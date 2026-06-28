@@ -54,6 +54,54 @@ impl Orchestrator {
     }
 
     pub async fn code(&self, request: CodeRequest) -> Result<CodeResponse> {
+        // Fast path: for short tasks, skip decomposition and go direct to model
+        if request.task.len() < 200 && !request.task.contains("architect") && !request.task.contains("design") {
+            return self.code_fast(request).await;
+        }
+        self.code_full(request).await
+    }
+
+    /// Fast code generation — single model call, no decomposition.
+    pub async fn code_fast(&self, request: CodeRequest) -> Result<CodeResponse> {
+        if request.task.trim().is_empty() {
+            return Err(OrchestratorError::InvalidRequest(
+                "code task cannot be empty".to_string(),
+            ));
+        }
+
+        // Skip decomposition — go direct to coder agent with selected model
+        let agent = self
+            .agents
+            .get("coder")
+            .ok_or_else(|| OrchestratorError::MissingAgent("coder".into()))?;
+
+        let model = if let Some(ref m) = request.model_override {
+            m.clone()
+        } else {
+            self.resolve_agent_model(agent, request.model_override.as_deref()).await
+        };
+
+        let subtask = SubTask {
+            id: "fast-1".into(),
+            description: request.task.clone(),
+            agent_name: "coder".into(),
+            input_files: request.files.clone(),
+        };
+
+        let result = agent
+            .execute_with_model(&subtask, &self.ollama, Some(&model))
+            .await?;
+
+        Ok(CodeResponse {
+            output: result.output,
+            files_written: result.files,
+            agent_used: agent.name.clone(),
+            model_used: model,
+        })
+    }
+
+    /// Full code generation with decomposition and parallel execution.
+    pub async fn code_full(&self, request: CodeRequest) -> Result<CodeResponse> {
         if request.task.trim().is_empty() {
             return Err(OrchestratorError::InvalidRequest(
                 "code task cannot be empty".to_string(),
@@ -62,17 +110,6 @@ impl Orchestrator {
 
         let complexity = self.router.classify(&request.task);
         let subtasks = self.prepare_subtasks(&request, complexity).await?;
-        let single_model_used = if subtasks.len() == 1 {
-            let subtask = &subtasks[0];
-            let agent = self
-                .agents
-                .get(&subtask.agent_name)
-                .or_else(|| self.agents.get("coder"))
-                .ok_or_else(|| OrchestratorError::MissingAgent(subtask.agent_name.clone()))?;
-            Some(self.resolve_agent_model(agent, request.model_override.as_deref()).await)
-        } else {
-            None
-        };
 
         if subtasks.len() == 1 {
             let subtask = subtasks.into_iter().next().expect("single subtask");
@@ -81,7 +118,7 @@ impl Orchestrator {
                 .get(&subtask.agent_name)
                 .or_else(|| self.agents.get("coder"))
                 .ok_or_else(|| OrchestratorError::MissingAgent(subtask.agent_name.clone()))?;
-            let model = single_model_used.clone().unwrap_or_else(|| agent.model.clone());
+            let model = self.resolve_agent_model(agent, request.model_override.as_deref()).await;
             let result = agent
                 .execute_with_model(&subtask, &self.ollama, Some(&model))
                 .await?;

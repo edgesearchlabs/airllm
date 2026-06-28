@@ -637,8 +637,9 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
     terminal.clear()?;
 
     let mut d = Dashboard::new(ollama_url);
+    // Load models synchronously (fast — cached in OllamaClient)
     d.refresh_models().await;
-    d.refresh_system().await;
+    // Skip refresh_system on startup — it runs in background every 10s
     d.status = "Ready. Tab=switch | ←→=mode | ↑↓=select | Enter=execute | c/q=stop | Esc=quit".into();
 
     let (result_tx, mut result_rx) = mpsc::channel::<DashboardResult>(10);
@@ -825,7 +826,7 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
                 let options = ChatOptions { temperature: temp, top_p: top_p_val, top_k: top_k_val, num_ctx: ctx };
 
                 // Retry only on connection errors (not timeout — timeout means model is too slow)
-                for attempt in 0..3u32 {
+                for attempt in 0..2u32 {
                     if cancel.load(Ordering::SeqCst) { return; }
                     match ollama.chat_with_metrics(&model, &messages, options.clone()).await {
                         Ok((resp, metrics)) => {
@@ -836,9 +837,9 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
                             let err_str = e.to_string();
                             let is_timeout = err_str.contains("timeout") || err_str.contains("elapsed") || err_str.contains("timed out");
                             let is_connection = err_str.contains("error sending request") || err_str.contains("connection refused") || err_str.contains("connect error");
-                            if attempt < 2 && !is_timeout {
-                                tracing::warn!("chat error (attempt {}): {err_str} — retrying in 2s", attempt + 1);
-                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            if attempt < 1 && !is_timeout {
+                                tracing::warn!("chat error (attempt {}): {err_str} — retrying in 1s", attempt + 1);
+                                tokio::time::sleep(Duration::from_secs(1)).await;
                             } else {
                                 let msg = if is_timeout {
                                     format!("Timeout (120s) — model '{model}' is too large for TUI. Use CLI: airllm chat --model {model}")
@@ -862,7 +863,7 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
             tokio::spawn(async move {
                 let req = CodeRequest { task: prompt.clone(), language: None, files: Vec::new(), model_override: Some(model.clone()) };
 
-                for attempt in 0..3u32 {
+                for attempt in 0..2u32 {
                     if cancel.load(Ordering::SeqCst) { return; }
                     let result = match mode {
                         Mode::Code | Mode::Autonomous => orchestrator.code(req.clone()).await.map(|r| r.output),
@@ -882,9 +883,9 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
                             let err_str = e.to_string();
                             let is_timeout = err_str.contains("timeout") || err_str.contains("elapsed") || err_str.contains("timed out");
                             let is_connection = err_str.contains("error sending request") || err_str.contains("connection refused") || err_str.contains("connect error");
-                            if attempt < 2 && !is_timeout {
-                                tracing::warn!("orchestrator error (attempt {}): {err_str} — retrying in 2s", attempt + 1);
-                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            if attempt < 1 && !is_timeout {
+                                tracing::warn!("orchestrator error (attempt {}): {err_str} — retrying in 1s", attempt + 1);
+                                tokio::time::sleep(Duration::from_secs(1)).await;
                             } else {
                                 let msg = if is_timeout {
                                     format!("Timeout (120s) — model '{model}' is too large for TUI. Use CLI: airllm chat --model {model}")

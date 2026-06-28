@@ -1,0 +1,32 @@
+# Scheduler config for autonomous agents
+# See: .github/skills/configure-scheduler/SKILL.md
+
+[[jobs]]
+id = "social-daily"
+agent_name = "social-media"
+task = "Post daily summary to social media"
+trigger = { type = "cron", expression = "0 9 * * * *", timezone = "America/Sao_Paulo" }
+enabled = true
+priority = 1
+max_retries = 3
+retry_delay_secs = 60
+
+[[jobs]]
+id = "msg-webhook"
+agent_name = "messaging"
+task = "Send message via webhook trigger"
+trigger = { type = "webhook", endpoint = "/trigger/messaging" }
+enabled = true
+priority = 5
+max_retries = 2
+retry_delay_secs = 30
+
+[[jobs]]
+id = "research-weekly"
+agent_name = "research"
+task = "Weekly research report"
+trigger = { type = "cron", expression = "0 6 * * 1", timezone = "America/Sao_Paulo" }
+enabled = true
+priority = 2
+max_retries = 3
+retry_delay_secs = 120

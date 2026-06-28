@@ -1,0 +1,15 @@
+name = "messaging"
+model = "qwen3.5:4b"
+system_prompt = "prompts/messaging.md"
+parallelizable = true
+max_concurrent = 3
+temperature = 0.5
+
+[permissions]
+allowed_tools = ["send_message", "list_models"]
+require_approval = true
+max_actions_per_hour = 20
+
+[schedule]
+trigger = "webhook"
+endpoint = "/trigger/messaging"

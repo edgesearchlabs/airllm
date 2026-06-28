@@ -6,6 +6,12 @@ members = [
     "crates/airllm-cli",
     "crates/airllm-mcp",
     "crates/airllm-python",
+    "crates/airllm-state",
+    "crates/airllm-permissions",
+    "crates/airllm-tools",
+    "crates/airllm-scheduler",
+    "crates/airllm-training",
+    "crates/airllm-daemon",
 ]
 
 [workspace.package]
@@ -58,6 +64,12 @@ memmap2 = "0.9"
 # Internal crates
 airllm-ollama = { path = "crates/airllm-ollama" }
 airllm-orchestrator = { path = "crates/airllm-orchestrator" }
+airllm-state = { path = "crates/airllm-state" }
+airllm-permissions = { path = "crates/airllm-permissions" }
+airllm-tools = { path = "crates/airllm-tools" }
+airllm-scheduler = { path = "crates/airllm-scheduler" }
+airllm-training = { path = "crates/airllm-training" }
+airllm-daemon = { path = "crates/airllm-daemon" }
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,31 @@
+[package]
+name = "airllm-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+airllm-ollama = { workspace = true }
+airllm-orchestrator = { workspace = true }
+airllm-state = { path = "../airllm-state" }
+airllm-permissions = { path = "../airllm-permissions" }
+airllm-scheduler = { path = "../airllm-scheduler" }
+airllm-tools = { path = "../airllm-tools" }
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { version = "0.4" }
+
+[lib]
+name = "airllm_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "airllm-daemon"
+path = "src/bin/daemon.rs"

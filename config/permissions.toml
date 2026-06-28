@@ -1,0 +1,30 @@
+# Permissions config for autonomous agents
+# See: .github/skills/configure-permissions/SKILL.md
+
+[roles.admin]
+tools = ["*"]
+approval_required = false
+
+[roles.operator]
+tools = ["code", "review", "test", "list_models", "web_search", "web_fetch"]
+approval_required = false
+
+[roles.automated]
+tools = ["post_social", "send_message", "send_email", "webhook_call"]
+approval_required = true
+
+[roles.researcher]
+tools = ["web_search", "web_fetch", "code", "list_models"]
+approval_required = false
+
+[agents.social-media]
+role = "automated"
+overrides = { tools = ["post_social", "webhook_call"], approval_required = false, max_actions_per_hour = 10 }
+
+[agents.messaging]
+role = "automated"
+overrides = { approval_required = true, max_actions_per_hour = 20 }
+
+[agents.research]
+role = "researcher"
+overrides = { max_actions_per_hour = 50 }

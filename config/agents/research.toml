@@ -1,0 +1,15 @@
+name = "research"
+model = "qwen3.6:27b"
+system_prompt = "prompts/research.md"
+parallelizable = false
+max_concurrent = 1
+temperature = 0.3
+
+[permissions]
+allowed_tools = ["web_search", "web_fetch", "code", "list_models"]
+require_approval = false
+max_actions_per_hour = 50
+
+[schedule]
+cron = "0 6 * * 1"
+timezone = "America/Sao_Paulo"

@@ -12,12 +12,19 @@ path = "src/main.rs"
 [dependencies]
 airllm-orchestrator = { workspace = true }
 airllm-ollama = { workspace = true }
+airllm-daemon = { workspace = true }
+airllm-state = { workspace = true }
+airllm-permissions = { workspace = true }
+airllm-scheduler = { workspace = true }
+airllm-training = { workspace = true }
+airllm-tools = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 crossterm = { workspace = true }
 futures = { workspace = true }
 ratatui = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true }
 toml = { workspace = true }

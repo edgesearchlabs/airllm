@@ -1,0 +1,9 @@
+name = "coder"
+default_model = "qwen3.6:27b"
+fallback_model = "qwen3.5:4b"
+system_prompt = "../prompts/coder.md"
+parallelizable = true
+max_concurrent = 3
+temperature = 0.2
+top_p = 0.9
+routing_patterns = ["implement", "create", "build", "write"]

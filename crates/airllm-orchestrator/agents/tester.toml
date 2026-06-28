@@ -1,0 +1,9 @@
+name = "tester"
+default_model = "qwen3.5:4b"
+fallback_model = "jaahas/crow:9b"
+system_prompt = "../prompts/tester.md"
+parallelizable = true
+max_concurrent = 2
+temperature = 0.2
+top_p = 0.9
+routing_patterns = ["test", "validate"]

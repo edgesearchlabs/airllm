@@ -1,0 +1,9 @@
+name = "security"
+default_model = "nemotron-3-nano:30b"
+fallback_model = "granite4.1:30b"
+system_prompt = "../prompts/security.md"
+parallelizable = false
+max_concurrent = 1
+temperature = 0.1
+top_p = 0.9
+routing_patterns = ["security", "vulnerability", "owasp", "audit"]

@@ -1,0 +1,9 @@
+name = "reviewer"
+default_model = "granite4.1:30b"
+fallback_model = "qwen3.6:27b"
+system_prompt = "../prompts/reviewer.md"
+parallelizable = false
+max_concurrent = 1
+temperature = 0.1
+top_p = 0.9
+routing_patterns = ["review", "audit"]

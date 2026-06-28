@@ -1,0 +1,9 @@
+name = "architect"
+default_model = "qwen3-coder-next:q8_0"
+fallback_model = "granite4.1:30b"
+system_prompt = "../prompts/architect.md"
+parallelizable = false
+max_concurrent = 1
+temperature = 0.1
+top_p = 0.9
+routing_patterns = ["architect", "design", "plan", "strategy"]

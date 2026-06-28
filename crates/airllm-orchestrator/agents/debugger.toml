@@ -1,0 +1,9 @@
+name = "debugger"
+default_model = "nemotron-3-nano:30b"
+fallback_model = "qwen3.6:27b"
+system_prompt = "../prompts/debugger.md"
+parallelizable = false
+max_concurrent = 1
+temperature = 0.1
+top_p = 0.9
+routing_patterns = ["debug", "fix", "error"]

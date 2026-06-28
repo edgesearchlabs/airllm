@@ -1,0 +1,137 @@
+[
+  {
+    "model": "qwen3.5:4b",
+    "type": "local",
+    "size": "4.7B",
+    "time_seconds": 99.01,
+    "error": null,
+    "code": "",
+    "compiles": false,
+    "runs": false,
+    "quality_score": 0,
+    "quality_reasons": [
+      "Não compila (+0)",
+      "Não executa ou crash (+0)"
+    ],
+    "response_length": 0,
+    "compile_error": "No valid Java code/class found in model output",
+    "run_output": null
+  },
+  {
+    "model": "qwen3.6:27b",
+    "type": "local",
+    "size": "27.8B",
+    "time_seconds": 125.21,
+    "error": "timed out",
+    "code": "",
+    "compiles": false,
+    "runs": false,
+    "quality_score": 0,
+    "quality_reasons": [
+      "Erro na chamada"
+    ],
+    "response_length": 0
+  },
+  {
+    "model": "qwen3-coder-next:q8_0",
+    "type": "local",
+    "size": "79.7B",
+    "time_seconds": 125.07,
+    "error": "timed out",
+    "code": "",
+    "compiles": false,
+    "runs": false,
+    "quality_score": 0,
+    "quality_reasons": [
+      "Erro na chamada"
+    ],
+    "response_length": 0
+  },
+  {
+    "model": "granite4.1:30b",
+    "type": "local",
+    "size": "30B",
+    "time_seconds": 77.1,
+    "error": null,
+    "code": "import java.util.Scanner;\n\npublic class Calculator {\n    public static void main(String[] args) {\n        Scanner scanner = new Scanner(System.in);\n        String input;\n        \n        System.out.println(\"Welcome to the Java Calculator!\");\n        System.out.println(\"Type 'help' for a list of commands.\");\n        \n        while (true) {\n            System.out.print(\">> \");\n            input = scanner.nextLine().trim();\n            \n            if (input.equalsIgnoreCase(\"quit\")) {\n                System.out.println(\"Goodbye!\");\n                break;\n            } else if (input.equalsIgnoreCase(\"help\")) {\n                printHelp();\n            } else {\n                try {\n                    processInput(input);\n                } catch (Exception e) {\n                    System.err.println(\"Error: \" + e.getMessage());\n                }\n            }\n        }\n        \n        scanner.close();\n    }\n    \n    private static void printHelp() {\n        System.out.println(\"Available commands:\");\n        System.out.println(\"  <expression>   Evaluate a mathematical expression\");\n        System.out.println(\"  quit           Exit the calculator\");\n        System.out.println(\"  help           Show this help menu\");\n    }\n    \n    private static void processInput(String input) throws Exception {\n        String[] parts = input.split(\"\\\\s+\");\n        \n        if (parts.length < 3) {\n            throw new IllegalArgumentException(\"Invalid expression format. Use: operand1 operator operand2\");\n        }\n        \n        String op1Str = parts[0];\n        String operator = parts[1];\n        String op2Str = parts[2];\n        \n        try {\n            double op1 = Double.parseDouble(op1Str);\n            double op2 = Double.parseDouble(op2Str);\n            \n            double result;\n            switch (operator) {\n                case \"+\":\n                    result = op1 + op2;\n                    break;\n                case \"-\":\n                    result = op1 - op2;\n                    break;\n                case \"*\":\n                    result = op1 * op2;\n                    break;\n                case \"/\":\n                    if (op2 == 0) {\n                        throw new ArithmeticException(\"Division by zero is not allowed.\");\n                    }\n                    result = op1 / op2;\n                    break;\n                default:\n                    throw new IllegalArgumentException(\"Unsupported operator: \" + operator);\n            }\n            \n            System.out.println(\"Result: \" + result);\n        } catch (NumberFormatException e) {\n            throw new IllegalArgumentException(\"Invalid number format. Please provide valid numeric operands.\");\n        }\n    }\n}",
+    "compiles": true,
+    "runs": true,
+    "quality_score": 100,
+    "quality_reasons": [
+      "Compila sem erros (+25)",
+      "Executa sem crash (+20)",
+      "Suporta adição (+5)",
+      "Suporta subtração (+5)",
+      "Suporta multiplicação (+5)",
+      "Suporta divisão (+5)",
+      "Trata divisão por zero (+10)",
+      "Tem comando help (+5)",
+      "Tem comando quit/exit (+5)",
+      "Tem try-catch para erros (+10)",
+      "Validação de input (+5)",
+      "REPL interativo com loop (+10)",
+      "Código bem indentado (+5)"
+    ],
+    "response_length": 2739,
+    "compile_error": null,
+    "run_output": "Welcome to the Java Calculator!\nType 'help' for a list of commands.\n>> Result: 8.0\n>> Goodbye!\n"
+  },
+  {
+    "model": "nemotron-3-nano:30b",
+    "type": "local",
+    "size": "30B",
+    "time_seconds": 33.27,
+    "error": null,
+    "code": "import java.util.Scanner;\n\npublic class Calculator {\n    private static final Scanner SCANNER = new Scanner(System.in);\n\n    public static void main(String[] args) {\n        printHelp();\n        while (true) {\n            System.out.print(\"> \");\n            String line = SCANNER.nextLine().trim();\n            if (line.isEmpty()) {\n                continue;\n            }\n            String[] parts = line.split(\"\\\\s+\", 3);\n            String command = parts[0].toLowerCase();\n\n            switch (command) {\n                case \"quit\":\n                    System.out.println(\"Goodbye!\");\n                    return;\n                case \"help\":\n                    printHelp();\n                    break;\n                case \"+\":\n                case \"-\":\n                case \"*\":\n                case \"/\":\n                    if (parts.length != 3) {\n                        System.out.println(\"Error: expected format: <num> <op> <num>\");\n                        break;\n                    }\n                    double left, right;\n                    try {\n                        left = Double.parseDouble(parts[1]);\n                        right = Double.parseDouble(parts[2]);\n                    } catch (NumberFormatException e) {\n                        System.out.println(\"Error: operands must be valid numbers.\");\n                        break;\n                    }\n                    double result;\n                    switch (command) {\n                        case \"+\":\n                            result = left + right;\n                            break;\n                        case \"-\":\n                            result = left - right;\n                            break;\n                        case \"*\":\n                            result = left * right;\n                            break;\n                        case \"/\":\n                            if (right == 0) {\n                                System.out.println(\"Error: division by zero is not allowed.\");\n                                continue;\n                            }\n                            result = left / right;\n                            break;\n                        default:\n                            System.out.println(\"Unsupported operator.\");\n                            continue;\n                    }\n                    System.out.println(\"= \" + result);\n                    break;\n                default:\n                    System.out.println(\"Unknown command. Type 'help' for available commands.\");\n            }\n        }\n    }\n\n    private static void printHelp() {\n        System.out.println(\"=== Simple Calculator ===\");\n        System.out.println(\"Supported commands:\");\n        System.out.println(\"  <num> <op> <num>   Perform arithmetic ( + - * / )\");\n        System.out.println(\"  quit               Exit the program\");\n        System.out.println(\"  help               Show this help message\");\n        System.out.println(\"Operators: +, -, *, /\");\n        System.out.println(\"Division by zero will produce an error message.\");\n        System.out.println(\"==========================\");\n    }\n}",
+    "compiles": true,
+    "runs": true,
+    "quality_score": 100,
+    "quality_reasons": [
+      "Compila sem erros (+25)",
+      "Executa sem crash (+20)",
+      "Suporta adição (+5)",
+      "Suporta subtração (+5)",
+      "Suporta multiplicação (+5)",
+      "Suporta divisão (+5)",
+      "Trata divisão por zero (+10)",
+      "Tem comando help (+5)",
+      "Tem comando quit/exit (+5)",
+      "Tem try-catch para erros (+10)",
+      "Validação de input (+5)",
+      "REPL interativo com loop (+10)",
+      "Código bem indentado (+5)"
+    ],
+    "response_length": 3131,
+    "compile_error": null,
+    "run_output": "=== Simple Calculator ===\nSupported commands:\n  <num> <op> <num>   Perform arithmetic ( + - * / )\n  quit               Exit the program\n  help               Show this help message\nOperators: +, -, *, /\nDivision by zero will produce an error message.\n==========================\n> Unknown command. Type 'help' for available commands.\n> Goodbye!\n"
+  },
+  {
+    "model": "jaahas/crow:9b",
+    "type": "local",
+    "size": "9B",
+    "time_seconds": 74.17,
+    "error": null,
+    "code": "import java.util.Scanner;\nimport java.util.regex.Pattern;\n\npublic class Calculator {\n    public static void main(String[] args) {\n        Scanner scanner = new Scanner(System.in);\n        System.out.println(\"=== Java Calculator ===\");\n        System.out.println(\"Type 'help' for commands.\");\n        System.out.println(\"Type 'quit' to exit.\");\n\n        while (true) {\n            System.out.print(\"> \");\n            String input = scanner.nextLine();\n\n            String trimmedInput = input.trim();\n\n            // Check for quit command\n            if (trimmedInput.equalsIgnoreCase(\"quit\")) {\n                System.out.println(\"Goodbye!\");\n                break;\n            }\n\n            // Check for help command\n            if (trimmedInput.equalsIgnoreCase(\"help\")) {\n                printHelp();\n                continue;\n            }\n\n            // Check for empty input\n            if (trimmedInput.isEmpty()) {\n                System.out.println(\"Error: Input cannot be empty.\");\n                continue;\n            }\n\n            // Validate input format (basic regex to ensure it looks like math)\n            // Allow digits, operators (+, -, *, /), parentheses, and spaces.\n            if (!trimmedInput.matches(\"[0-9+\\\\-*/().\\\\s]+\")) {\n                System.out.println(\"Error: Invalid characters in expression.\");\n                continue;\n            }\n\n            try {\n                // Using eval to handle complex expressions and operator precedence\n                double result = (double) eval(trimmedInput);\n                System.out.println(\"Result: \" + result);\n            } catch (ArithmeticException e) {\n                System.out.println(\"Error: Division by zero.\");\n            } catch (NumberFormatException e) {\n                System.out.println(\"Error: Invalid number format.\");\n            } catch (ClassCastException e) {\n                System.out.println(\"Error: Invalid expression type.\");\n            } catch (Exception e) {\n                System.out.println(\"Error: \" + e.getMessage());\n            }\n        }\n        scanner.close();\n    }\n\n    private static void printHelp() {\n        System.out.println(\"Commands:\");\n        System.out.println(\"  +, -, *, /  : Arithmetic operations\");\n        System.out.println(\"  ( )        : Parentheses for grouping\");\n        System.out.println(\"  help       : Show this help\");\n        System.out.println(\"  quit       : Exit the calculator\");\n    }\n}",
+    "compiles": false,
+    "runs": false,
+    "quality_score": 70,
+    "quality_reasons": [
+      "Não compila (+0)",
+      "Não executa ou crash (+0)",
+      "Suporta adição (+5)",
+      "Suporta subtração (+5)",
+      "Suporta multiplicação (+5)",
+      "Suporta divisão (+5)",
+      "Trata divisão por zero (+10)",
+      "Tem comando help (+5)",
+      "Tem comando quit/exit (+5)",
+      "Tem try-catch para erros (+10)",
+      "Validação de input (+5)",
+      "REPL interativo com loop (+10)",
+      "Código bem indentado (+5)"
+    ],
+    "response_length": 2462,
+    "compile_error": "/home/eriktonon/airllm/benchmark_results/Calculator_jaahas_crow_9b.java:44: error: cannot find symbol\n                double result = (double) eval(trimmedInput);\n                                         ^\n  symbol:   method eval(String)\n  location: class Calculator_jaahas_crow_9b\n1 error\n",
+    "run_output": null
+  }
+]

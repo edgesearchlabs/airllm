@@ -183,7 +183,7 @@ pub enum ExecState {
     Idle,
     Running { started: Instant, #[allow(dead_code)] mode_label: String, cancel: Arc<AtomicBool> },
     Done,
-    Error { msg: String, retries: u32 },
+    Error { #[allow(dead_code)] msg: String, #[allow(dead_code)] retries: u32 },
 }
 
 impl ExecState {
@@ -671,20 +671,10 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
             if d.mode == Mode::Autonomous { d.autonomous_cycles += 1; }
         }
 
-        // Check for errors (retry logic)
+        // Check for errors — retry already happened inside tokio::spawn
         if let Ok((err_msg, retry_count)) = error_rx.try_recv() {
-            if retry_count < 3 {
-                d.status = format!("✗ Error (retry {}/3): {err_msg}", retry_count + 1);
-                d.exec_state = ExecState::Error { msg: err_msg, retries: retry_count };
-                // Auto-retry after 2s
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                d.status = format!("⠿ Retrying... (attempt {}/{})", retry_count + 2, 3);
-                // Re-execute with same params
-                // (In production, we'd store the last action and replay it)
-            } else {
-                d.status = format!("✗ Failed after 3 retries: {err_msg}");
-                d.exec_state = ExecState::Error { msg: err_msg, retries: retry_count };
-            }
+            d.status = format!("✗ {err_msg}");
+            d.exec_state = ExecState::Error { msg: err_msg, retries: retry_count };
         }
 
         // Check for benchmark progress
@@ -791,12 +781,15 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
                         Err(e) => {
                             let err_str = e.to_string();
                             let is_timeout = err_str.contains("timeout") || err_str.contains("elapsed") || err_str.contains("timed out");
+                            let is_connection = err_str.contains("error sending request") || err_str.contains("connection refused") || err_str.contains("connect error");
                             if attempt < 2 && !is_timeout {
                                 tracing::warn!("chat error (attempt {}): {err_str} — retrying in 2s", attempt + 1);
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                             } else {
                                 let msg = if is_timeout {
-                                    format!("Timeout (120s) — model '{model}' is too large. Try a smaller model or use CLI with --model. Error: {err_str}")
+                                    format!("Timeout (120s) — model '{model}' is too large for TUI. Use CLI: airllm chat --model {model}")
+                                } else if is_connection {
+                                    format!("Connection error — is Ollama running on localhost:11434? Try: ollama serve. Details: {err_str}")
                                 } else {
                                     err_str
                                 };
@@ -834,12 +827,15 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
                         Err(e) => {
                             let err_str = e.to_string();
                             let is_timeout = err_str.contains("timeout") || err_str.contains("elapsed") || err_str.contains("timed out");
+                            let is_connection = err_str.contains("error sending request") || err_str.contains("connection refused") || err_str.contains("connect error");
                             if attempt < 2 && !is_timeout {
                                 tracing::warn!("orchestrator error (attempt {}): {err_str} — retrying in 2s", attempt + 1);
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                             } else {
                                 let msg = if is_timeout {
-                                    format!("Timeout (120s) — model '{model}' is too large for TUI. Use CLI: airllm chat --model {model} --prompt \"...\"")
+                                    format!("Timeout (120s) — model '{model}' is too large for TUI. Use CLI: airllm chat --model {model}")
+                                } else if is_connection {
+                                    format!("Connection error — is Ollama running on localhost:11434? Try: ollama serve. Details: {err_str}")
                                 } else {
                                     err_str
                                 };
@@ -1224,7 +1220,7 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) -> ClickAreas {
     let exec_indicator = match &d.exec_state {
         ExecState::Running { .. } => format!("{} {:.1}s | ", d.exec_state.spinner(), d.exec_state.elapsed_secs()),
         ExecState::Done => "✓ | ".into(),
-        ExecState::Error { msg, retries } => format!("✗ retry {retries} | {msg} | "),
+        ExecState::Error { .. } => "✗ | ".into(),
         ExecState::Idle => "".into(),
     };
     let status_style = match &d.exec_state {

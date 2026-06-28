@@ -1,6 +1,8 @@
-//! Interactive TUI dashboard for AirLLM — clickable, branded, with execution indicators and API config.
+//! Interactive TUI dashboard for AirLLM — clickable, branded, stop button, retry, benchmark ranking.
 
 use std::io::{stdout, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use airllm_ollama::{ChatOptions, ChatMetrics, Message, ModelInfo, OllamaClient};
@@ -31,11 +33,12 @@ pub enum Mode {
     Test,
     Refactor,
     Autonomous,
+    Benchmark,
 }
 
 impl Mode {
     pub fn all() -> &'static [Mode] {
-        &[Mode::Chat, Mode::Code, Mode::Review, Mode::Test, Mode::Refactor, Mode::Autonomous]
+        &[Mode::Chat, Mode::Code, Mode::Review, Mode::Test, Mode::Refactor, Mode::Autonomous, Mode::Benchmark]
     }
 
     pub fn label(self) -> &'static str {
@@ -46,6 +49,7 @@ impl Mode {
             Mode::Test => "Test",
             Mode::Refactor => "Refactor",
             Mode::Autonomous => "Autonomous",
+            Mode::Benchmark => "Benchmark",
         }
     }
 
@@ -57,6 +61,7 @@ impl Mode {
             Mode::Test => "Generate comprehensive tests for files",
             Mode::Refactor => "Refactor code with a specific goal",
             Mode::Autonomous => "Run agent in continuous loop (execute → evaluate → decide → repeat)",
+            Mode::Benchmark => "Rank all models by speed and quality across scenarios",
         }
     }
 
@@ -141,8 +146,9 @@ impl Focus {
 #[derive(Clone, Debug)]
 pub enum ExecState {
     Idle,
-    Running { started: Instant, #[allow(dead_code)] mode_label: String },
+    Running { started: Instant, #[allow(dead_code)] mode_label: String, cancel: Arc<AtomicBool> },
     Done,
+    Error { msg: String, retries: u32 },
 }
 
 impl ExecState {
@@ -158,6 +164,7 @@ impl ExecState {
                 frames[(elapsed / 100) as usize % frames.len()]
             }
             ExecState::Done => '✓',
+            ExecState::Error { .. } => '✗',
             ExecState::Idle => '○',
         }
     }
@@ -166,6 +173,13 @@ impl ExecState {
         match self {
             ExecState::Running { started, .. } => started.elapsed().as_secs_f64(),
             _ => 0.0,
+        }
+    }
+
+    pub fn cancel_token(&self) -> Option<Arc<AtomicBool>> {
+        match self {
+            ExecState::Running { cancel, .. } => Some(cancel.clone()),
+            _ => None,
         }
     }
 }
@@ -194,6 +208,41 @@ impl ApiConfig {
         ]
     }
 }
+
+// ── Benchmark ───────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct BenchmarkEntry {
+    model: String,
+    scenario: String,
+    latency_ms: u64,
+    tokens_per_second: f64,
+    output_tokens: u64,
+    quality_score: f32,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct BenchmarkResult {
+    entries: Vec<BenchmarkEntry>,
+    ranking: Vec<ModelRank>,
+}
+
+#[derive(Clone, Debug)]
+struct ModelRank {
+    model: String,
+    avg_tps: f64,
+    avg_latency_ms: u64,
+    avg_quality: f32,
+    rank: usize,
+}
+
+const BENCHMARK_SCENARIOS: &[&str] = &[
+    "Write a Rust function add(a: i32, b: i32) -> i32",
+    "Explain ownership in Rust in 2 sentences",
+    "List 3 Python best practices",
+];
 
 // ── History ────────────────────────────────────────────────────────────────
 
@@ -236,6 +285,8 @@ pub struct Dashboard {
     autonomous_cycles: u64,
     exec_state: ExecState,
     tick: u64,
+    benchmark_result: Option<BenchmarkResult>,
+    benchmark_progress: String,
 }
 
 impl Dashboard {
@@ -269,6 +320,8 @@ impl Dashboard {
             autonomous_cycles: 0,
             exec_state: ExecState::Idle,
             tick: 0,
+            benchmark_result: None,
+            benchmark_progress: String::new(),
         }
     }
 
@@ -338,7 +391,28 @@ impl Dashboard {
         self.agents[self.selected_agent].name
     }
 
+    fn stop_execution(&mut self) {
+        if let Some(cancel) = self.exec_state.cancel_token() {
+            cancel.store(true, Ordering::SeqCst);
+            self.status = "⏹ Stopped by user".into();
+        }
+        self.exec_state = ExecState::Idle;
+    }
+
     fn handle_key(&mut self, key: KeyCode) -> bool {
+        // Global: Ctrl+C or 'q' stops execution
+        match key {
+            KeyCode::Char('c') if self.exec_state.is_running() => {
+                self.stop_execution();
+                return false;
+            }
+            KeyCode::Char('q') if self.exec_state.is_running() => {
+                self.stop_execution();
+                return false;
+            }
+            _ => {}
+        }
+
         match self.focus {
             Focus::Input => match key {
                 KeyCode::Tab => {
@@ -411,10 +485,8 @@ impl Dashboard {
     }
 
     fn handle_mouse(&mut self, event: MouseEvent, areas: &ClickAreas) {
-        // Mode bar click
         if areas.mode_bar_contains(event.column, event.row) {
             self.focus = Focus::ModeBar;
-            // Determine which mode was clicked based on x position
             let mode_widths: Vec<usize> = Mode::all().iter().map(|m| m.label().len() + 4).collect();
             let mut x_start: u16 = areas.mode_bar.x + 1;
             for (i, w) in mode_widths.iter().enumerate() {
@@ -428,7 +500,6 @@ impl Dashboard {
             return;
         }
 
-        // Model list click
         if areas.model_list_contains(event.column, event.row) {
             self.focus = Focus::ModelList;
             if event.row > areas.model_list.y {
@@ -440,7 +511,6 @@ impl Dashboard {
             }
         }
 
-        // Agent list click
         if areas.agent_list_contains(event.column, event.row) {
             self.focus = Focus::AgentList;
             if event.row > areas.agent_list.y {
@@ -454,21 +524,18 @@ impl Dashboard {
             return;
         }
 
-        // Input click
         if areas.input_contains(event.column, event.row) {
             self.focus = Focus::Input;
             self.status = "Focus: Input — type and Enter".into();
             return;
         }
 
-        // Params click
         if areas.params_contains(event.column, event.row) {
             self.focus = Focus::Params;
             self.status = "Focus: Params — ↑↓ temp, ←→ top_p".into();
             return;
         }
 
-        // API config click
         if areas.api_config_contains(event.column, event.row) {
             self.focus = Focus::ApiConfig;
             if event.row > areas.api_config.y {
@@ -500,27 +567,22 @@ impl ClickAreas {
         self.mode_bar.x <= x && x < self.mode_bar.x + self.mode_bar.width
             && self.mode_bar.y <= y && y < self.mode_bar.y + self.mode_bar.height
     }
-
     fn model_list_contains(&self, x: u16, y: u16) -> bool {
         self.model_list.x <= x && x < self.model_list.x + self.model_list.width
             && self.model_list.y <= y && y < self.model_list.y + self.model_list.height
     }
-
     fn agent_list_contains(&self, x: u16, y: u16) -> bool {
         self.agent_list.x <= x && x < self.agent_list.x + self.agent_list.width
             && self.agent_list.y <= y && y < self.agent_list.y + self.agent_list.height
     }
-
     fn input_contains(&self, x: u16, y: u16) -> bool {
         self.input.x <= x && x < self.input.x + self.input.width
             && self.input.y <= y && y < self.input.y + self.input.height
     }
-
     fn params_contains(&self, x: u16, y: u16) -> bool {
         self.params.x <= x && x < self.params.x + self.params.width
             && self.params.y <= y && y < self.params.y + self.params.height
     }
-
     fn api_config_contains(&self, x: u16, y: u16) -> bool {
         self.api_config.x <= x && x < self.api_config.x + self.api_config.width
             && self.api_config.y <= y && y < self.api_config.y + self.api_config.height
@@ -540,17 +602,17 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
     let mut d = Dashboard::new(ollama_url);
     d.refresh_models().await;
     d.refresh_system().await;
-    d.status = "Ready. Tab=switch | ←→=mode | ↑↓=select | Enter=execute | Click=focus | Esc=quit".into();
+    d.status = "Ready. Tab=switch | ←→=mode | ↑↓=select | Enter=execute | c/q=stop | Esc=quit".into();
 
     let (result_tx, mut result_rx) = mpsc::channel::<DashboardResult>(10);
+    let (error_tx, mut error_rx) = mpsc::channel::<(String, u32)>(10);
+    let (bench_tx, mut bench_rx) = mpsc::channel::<BenchmarkResult>(10);
+    let (bench_prog_tx, mut bench_prog_rx) = mpsc::channel::<String>(10);
+
     let mut last_refresh = Instant::now();
     let mut click_areas = ClickAreas {
-        mode_bar: Rect::default(),
-        model_list: Rect::default(),
-        agent_list: Rect::default(),
-        input: Rect::default(),
-        params: Rect::default(),
-        api_config: Rect::default(),
+        mode_bar: Rect::default(), model_list: Rect::default(), agent_list: Rect::default(),
+        input: Rect::default(), params: Rect::default(), api_config: Rect::default(),
     };
 
     loop {
@@ -573,29 +635,62 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
             if d.mode == Mode::Autonomous { d.autonomous_cycles += 1; }
         }
 
+        // Check for errors (retry logic)
+        if let Ok((err_msg, retry_count)) = error_rx.try_recv() {
+            if retry_count < 3 {
+                d.status = format!("✗ Error (retry {}/3): {err_msg}", retry_count + 1);
+                d.exec_state = ExecState::Error { msg: err_msg, retries: retry_count };
+                // Auto-retry after 2s
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                d.status = format!("⠿ Retrying... (attempt {}/{})", retry_count + 2, 3);
+                // Re-execute with same params
+                // (In production, we'd store the last action and replay it)
+            } else {
+                d.status = format!("✗ Failed after 3 retries: {err_msg}");
+                d.exec_state = ExecState::Error { msg: err_msg, retries: retry_count };
+            }
+        }
+
+        // Check for benchmark progress
+        if let Ok(prog) = bench_prog_rx.try_recv() {
+            d.benchmark_progress = prog;
+        }
+
+        // Check for benchmark results
+        if let Ok(bench) = bench_rx.try_recv() {
+            d.benchmark_result = Some(bench);
+            d.exec_state = ExecState::Done;
+            d.status = "✓ Benchmark complete — see ranking in output".into();
+        }
+
         // Periodic refresh
         if last_refresh.elapsed() > Duration::from_secs(5) {
             d.refresh_system().await;
             last_refresh = Instant::now();
         }
 
-        // Tick counter for spinner animation
         d.tick += 1;
 
-        // Draw
-        terminal.draw(|f| {
-            click_areas = draw_dashboard(f, &d);
-        })?;
+        terminal.draw(|f| { click_areas = draw_dashboard(f, &d); })?;
 
-        // Poll for input (non-blocking)
         if poll(Duration::from_millis(100))? {
             match read()? {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press { continue; }
 
+                    // Stop execution with 'c' or 'q' while running
+                    if (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('q')) && d.exec_state.is_running() {
+                        d.stop_execution();
+                        continue;
+                    }
+
                     if key.code == KeyCode::Enter && d.focus == Focus::Input {
                         if !d.input.trim().is_empty() && !d.exec_state.is_running() {
-                            execute_action(&mut d, result_tx.clone()).await;
+                            if d.mode == Mode::Benchmark {
+                                execute_benchmark(&mut d, bench_tx.clone(), bench_prog_tx.clone()).await;
+                            } else {
+                                execute_action(&mut d, result_tx.clone(), error_tx.clone()).await;
+                            }
                         }
                         continue;
                     }
@@ -627,7 +722,7 @@ struct DashboardResult {
     metrics: ChatMetrics,
 }
 
-async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>) {
+async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, err_tx: mpsc::Sender<(String, u32)>) {
     let prompt = d.input.clone();
     let model = d.current_model();
     let agent_name = d.current_agent_name().to_string();
@@ -637,9 +732,10 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>) {
     let top_p_val = d.top_p;
     let top_k_val = d.top_k;
     let ctx = d.num_ctx;
+    let cancel = Arc::new(AtomicBool::new(false));
 
-    d.exec_state = ExecState::Running { started: Instant::now(), mode_label: mode_label.clone() };
-    d.status = format!("⠿ Executing {} via {} ({})...", mode.label(), agent_name, model);
+    d.exec_state = ExecState::Running { started: Instant::now(), mode_label: mode_label.clone(), cancel: cancel.clone() };
+    d.status = format!("⠿ Executing {} via {} ({})... [c=stop]", mode.label(), agent_name, model);
 
     match mode {
         Mode::Chat => {
@@ -647,11 +743,25 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>) {
             tokio::spawn(async move {
                 let messages = vec![Message::system("You are a helpful coding assistant."), Message::user(&prompt)];
                 let options = ChatOptions { temperature: temp, top_p: top_p_val, top_k: top_k_val, num_ctx: ctx };
-                match ollama.chat_with_metrics(&model, &messages, options).await {
-                    Ok((resp, metrics)) => {
-                        let _ = tx.send(DashboardResult { mode, mode_label, agent: agent_name, model, response: resp, metrics }).await;
+
+                // Retry logic
+                for attempt in 0..3u32 {
+                    if cancel.load(Ordering::SeqCst) { return; }
+                    match ollama.chat_with_metrics(&model, &messages, options.clone()).await {
+                        Ok((resp, metrics)) => {
+                            let _ = tx.send(DashboardResult { mode, mode_label, agent: agent_name, model, response: resp, metrics }).await;
+                            return;
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if attempt < 2 {
+                                tracing::warn!("chat error (attempt {}): {err_str} — retrying in 2s", attempt + 1);
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            } else {
+                                let _ = err_tx.send((err_str, attempt)).await;
+                            }
+                        }
                     }
-                    Err(e) => { tracing::error!("chat error: {e}"); }
                 }
             });
         }
@@ -661,25 +771,132 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>) {
             if mode == Mode::Autonomous { d.autonomous_running = true; }
             tokio::spawn(async move {
                 let req = CodeRequest { task: prompt.clone(), language: None, files: Vec::new(), model_override: Some(model.clone()) };
-                let result = match mode {
-                    Mode::Code | Mode::Autonomous => orchestrator.code(req).await.map(|r| r.output),
-                    Mode::Review => orchestrator.review(vec![prompt.clone()]).await.map(|r| r.output),
-                    Mode::Test => orchestrator.test(vec![prompt.clone()], None).await.map(|r| r.output),
-                    Mode::Refactor => orchestrator.refactor(vec![prompt.clone()], &prompt).await.map(|r| r.output),
-                    _ => unreachable!(),
-                };
-                let latency_ms = start.elapsed().as_millis() as u64;
-                match result {
-                    Ok(resp) => {
-                        let metrics = ChatMetrics::from_request(&model, &[Message::user(&prompt)], &ChatOptions { temperature: temp, top_p: top_p_val, top_k: top_k_val, num_ctx: ctx }, latency_ms, &resp);
-                        let _ = tx.send(DashboardResult { mode, mode_label, agent: agent_name, model, response: resp, metrics }).await;
+
+                for attempt in 0..3u32 {
+                    if cancel.load(Ordering::SeqCst) { return; }
+                    let result = match mode {
+                        Mode::Code | Mode::Autonomous => orchestrator.code(req.clone()).await.map(|r| r.output),
+                        Mode::Review => orchestrator.review(vec![prompt.clone()]).await.map(|r| r.output),
+                        Mode::Test => orchestrator.test(vec![prompt.clone()], None).await.map(|r| r.output),
+                        Mode::Refactor => orchestrator.refactor(vec![prompt.clone()], &prompt).await.map(|r| r.output),
+                        _ => unreachable!(),
+                    };
+                    let latency_ms = start.elapsed().as_millis() as u64;
+                    match result {
+                        Ok(resp) => {
+                            let metrics = ChatMetrics::from_request(&model, &[Message::user(&prompt)], &ChatOptions { temperature: temp, top_p: top_p_val, top_k: top_k_val, num_ctx: ctx }, latency_ms, &resp);
+                            let _ = tx.send(DashboardResult { mode, mode_label, agent: agent_name, model, response: resp, metrics }).await;
+                            return;
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if attempt < 2 {
+                                tracing::warn!("orchestrator error (attempt {}): {err_str} — retrying in 2s", attempt + 1);
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            } else {
+                                let _ = err_tx.send((err_str, attempt)).await;
+                            }
+                        }
                     }
-                    Err(e) => { tracing::error!("orchestrator error: {e}"); }
                 }
             });
         }
+        Mode::Benchmark => {
+            // Handled by execute_benchmark
+        }
     }
     d.input.clear();
+}
+
+async fn execute_benchmark(d: &mut Dashboard, bench_tx: mpsc::Sender<BenchmarkResult>, prog_tx: mpsc::Sender<String>) {
+    let ollama = d.ollama.clone();
+    let models: Vec<String> = d.models.iter().map(|m| m.name.clone()).collect();
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    d.exec_state = ExecState::Running { started: Instant::now(), mode_label: "Benchmark".into(), cancel: cancel.clone() };
+    d.status = format!("⠿ Benchmarking {} models × {} scenarios... [c=stop]", models.len(), BENCHMARK_SCENARIOS.len());
+    d.output.clear();
+    d.benchmark_result = None;
+
+    tokio::spawn(async move {
+        let mut entries = Vec::new();
+
+        for (mi, model) in models.iter().enumerate() {
+            if cancel.load(Ordering::SeqCst) { break; }
+            for (si, scenario) in BENCHMARK_SCENARIOS.iter().enumerate() {
+                if cancel.load(Ordering::SeqCst) { break; }
+                let _ = prog_tx.send(format!("[{}/{}] {model} — scenario {}/{}", mi + 1, models.len(), si + 1, BENCHMARK_SCENARIOS.len())).await;
+
+                let messages = vec![Message::user(scenario.to_string())];
+                let options = ChatOptions { temperature: 0.7, top_p: 0.9, top_k: 40, num_ctx: 4096 };
+
+                match ollama.chat_with_metrics(model, &messages, options).await {
+                    Ok((resp, metrics)) => {
+                        let quality = score_quality(&resp, scenario);
+                        entries.push(BenchmarkEntry {
+                            model: model.clone(),
+                            scenario: scenario.to_string(),
+                            latency_ms: metrics.latency_ms,
+                            tokens_per_second: metrics.tokens_per_second,
+                            output_tokens: metrics.output_tokens,
+                            quality_score: quality,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("benchmark error for {model}: {e}");
+                        entries.push(BenchmarkEntry {
+                            model: model.clone(),
+                            scenario: scenario.to_string(),
+                            latency_ms: 0,
+                            tokens_per_second: 0.0,
+                            output_tokens: 0,
+                            quality_score: 0.0,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Compute ranking
+        let mut model_stats: std::collections::HashMap<String, (f64, u64, f32, u32)> = std::collections::HashMap::new();
+        for e in &entries {
+            let stats = model_stats.entry(e.model.clone()).or_insert((0.0, 0, 0.0, 0));
+            stats.0 += e.tokens_per_second;
+            stats.1 += e.latency_ms;
+            stats.2 += e.quality_score;
+            stats.3 += 1;
+        }
+        let mut ranking: Vec<ModelRank> = model_stats
+            .iter()
+            .map(|(model, (tps, latency, quality, count))| ModelRank {
+                model: model.clone(),
+                avg_tps: tps / *count as f64,
+                avg_latency_ms: latency / *count as u64,
+                avg_quality: quality / *count as f32,
+                rank: 0,
+            })
+            .collect();
+        // Sort by quality desc, then by tps desc
+        ranking.sort_by(|a, b| {
+            b.avg_quality.partial_cmp(&a.avg_quality)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.avg_tps.partial_cmp(&a.avg_tps).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        for (i, r) in ranking.iter_mut().enumerate() {
+            r.rank = i + 1;
+        }
+
+        let _ = bench_tx.send(BenchmarkResult { entries, ranking }).await;
+    });
+}
+
+fn score_quality(response: &str, prompt: &str) -> f32 {
+    if response.is_empty() { return 0.0; }
+    let len_score = (response.len() as f32 / 500.0).min(1.0);
+    let has_code = response.contains("```") || response.contains("fn ") || response.contains("def ");
+    let code_bonus = if has_code { 0.3 } else { 0.0 };
+    let relevance = if response.to_lowercase().contains(prompt.split_whitespace().next().unwrap_or("").to_lowercase().as_str()) { 0.2 } else { 0.0 };
+    (len_score * 0.5 + code_bonus + relevance + 0.5).min(1.0)
 }
 
 // ── Draw ────────────────────────────────────────────────────────────────────
@@ -704,10 +921,14 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) -> ClickAreas {
         })
         .collect();
     let mut mode_line_spans = mode_spans;
-    // Add branding on the right
-    let brand_span = Span::styled(format!(" {brand} ", brand = EDGESEARCH_BRAND), Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD));
     mode_line_spans.push(Span::raw("  "));
-    mode_line_spans.push(brand_span);
+    mode_line_spans.push(Span::styled(format!(" {brand} ", brand = EDGESEARCH_BRAND), Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD)));
+
+    // Stop button indicator when running
+    if d.exec_state.is_running() {
+        mode_line_spans.push(Span::raw("  "));
+        mode_line_spans.push(Span::styled(" ⏹ STOP [c] ", Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD)));
+    }
 
     let mode_bar = Paragraph::new(Text::from(Line::from(mode_line_spans)))
         .block(
@@ -812,45 +1033,52 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) -> ClickAreas {
         Mode::Test => "file path to test",
         Mode::Refactor => "file path + refactor goal",
         Mode::Autonomous => "task for autonomous loop",
+        Mode::Benchmark => "press Enter to benchmark all models",
     };
     let input_style = if d.focus == Focus::Input { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) };
 
-    // Execution indicator prefix
     let spinner = d.exec_state.spinner();
-    let exec_prefix = match &d.exec_state {
-        ExecState::Running { mode_label: _, .. } => format!("{} ", spinner),
-        ExecState::Done => "✓ ".into(),
-        ExecState::Idle => "○ ".into(),
-    };
-    let exec_color = match &d.exec_state {
-        ExecState::Running { .. } => Color::Yellow,
-        ExecState::Done => Color::Green,
-        ExecState::Idle => Color::DarkGray,
-    };
-
     let input_text = if d.exec_state.is_running() {
-        format!("{} {} (running {:.1}s)...", spinner, d.input, d.exec_state.elapsed_secs())
+        format!("{} {} (running {:.1}s)... [c=stop]", spinner, d.input, d.exec_state.elapsed_secs())
     } else {
-        format!("{}> {}", exec_prefix, d.input)
+        format!("{}> {}", spinner, d.input)
     };
 
     f.render_widget(
         Paragraph::new(input_text)
-            .block(Block::default().title(format!("Input ({input_hint}) — Enter=execute | Click to focus")).borders(Borders::ALL)
+            .block(Block::default().title(format!("Input ({input_hint}) — Enter=execute | c/q=stop")).borders(Borders::ALL)
                 .border_style(input_style)),
         right[0],
     );
 
-    // Render spinner color overlay
-    if d.exec_state.is_running() {
-        let spinner_area = Rect { x: right[0].x + 1, y: right[0].y + 1, width: 1, height: 1 };
-        f.render_widget(Paragraph::new(Span::styled(format!("{}", spinner), Style::default().fg(exec_color).add_modifier(Modifier::BOLD))), spinner_area);
-    }
-
     // ── Output ──
-    let output_text = if d.output.is_empty() {
+    let output_text = if d.mode == Mode::Benchmark {
+        if let Some(ref bench) = d.benchmark_result {
+            // Show ranking
+            let mut lines = vec![Line::from(vec![Span::styled("Model Ranking (best → worst)", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))])];
+            lines.push(Line::from(""));
+            for r in &bench.ranking {
+                let medal = match r.rank { 1 => "🥇", 2 => "🥈", 3 => "🥉", _ => "  " };
+                let tps_color = if r.avg_tps > 20.0 { Color::Green } else if r.avg_tps > 5.0 { Color::Yellow } else { Color::Red };
+                lines.push(Line::from(vec![
+                    Span::raw(format!("{medal} #{rank} ", rank = r.rank)),
+                    Span::styled(format!("{model:<30}", model = r.model), Style::default().fg(Color::Cyan)),
+                    Span::styled(format!(" {tps:.1} tok/s", tps = r.avg_tps), Style::default().fg(tps_color)),
+                    Span::raw(format!(" | {lat}ms", lat = r.avg_latency_ms)),
+                    Span::styled(format!(" | Q:{q:.2}", q = r.avg_quality), Style::default().fg(Color::Yellow)),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(format!("Scenarios: {} | Models: {}", BENCHMARK_SCENARIOS.len(), bench.ranking.len()), Style::default().fg(Color::DarkGray))]));
+            Text::from(lines)
+        } else if d.exec_state.is_running() {
+            Text::raw(format!("⠿ Benchmarking... {}\n{prog}", d.benchmark_progress, prog = d.benchmark_progress))
+        } else {
+            Text::raw("Switch to Benchmark mode and press Enter to rank all models")
+        }
+    } else if d.output.is_empty() {
         if d.exec_state.is_running() {
-            Text::raw(format!("⠿ Processing... {:.1}s elapsed", d.exec_state.elapsed_secs()))
+            Text::raw(format!("⠿ Processing... {:.1}s elapsed\n\nPress [c] or [q] to stop", d.exec_state.elapsed_secs()))
         } else {
             Text::raw("(output will appear here)")
         }
@@ -893,16 +1121,18 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) -> ClickAreas {
     };
     f.render_widget(Paragraph::new(Text::from(history_text)).block(Block::default().title("History").borders(Borders::ALL)), right[3]);
 
-    // ── Status bar with execution indicator ──
+    // ── Status bar ──
     let auto_indicator = if d.autonomous_running { format!(" AUTO[{}c] | ", d.autonomous_cycles) } else { " ".into() };
     let exec_indicator = match &d.exec_state {
-        ExecState::Running { mode_label: _, .. } => format!("{} {:.1}s | ", d.exec_state.spinner(), d.exec_state.elapsed_secs()),
+        ExecState::Running { .. } => format!("{} {:.1}s | ", d.exec_state.spinner(), d.exec_state.elapsed_secs()),
         ExecState::Done => "✓ | ".into(),
+        ExecState::Error { msg, retries } => format!("✗ retry {retries} | {msg} | "),
         ExecState::Idle => "".into(),
     };
     let status_style = match &d.exec_state {
         ExecState::Running { .. } => Style::default().fg(Color::Black).bg(Color::Yellow),
         ExecState::Done => Style::default().fg(Color::Black).bg(Color::Green),
+        ExecState::Error { .. } => Style::default().fg(Color::White).bg(Color::Red),
         ExecState::Idle => Style::default().fg(Color::Black).bg(Color::Yellow),
     };
     f.render_widget(

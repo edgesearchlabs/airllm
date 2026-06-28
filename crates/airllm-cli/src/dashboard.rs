@@ -23,6 +23,33 @@ use tokio::sync::mpsc;
 
 const EDGESEARCH_BRAND: &str = "⬡ EdgeSearch";
 
+// ── Model Tags (best-for ranking based on real tests) ───────────────────────
+
+/// Returns a "best for" tag for a model based on benchmark results.
+fn model_best_for(model_name: &str) -> &'static str {
+    match model_name {
+        "qwen2.5-coder:14b" => "🥇 Code+Tech",
+        "qwen3.5:4b" => "🥈 Knowledge+Fast",
+        "deepseek-coder-v2:16b" => "🥉 Tech Explain",
+        "granite4.1:30b" => "⭐ Max Quality",
+        "gemma4:12b" => "💬 General",
+        "codegemma:7b" => "⚡ Quick",
+        "qwen3.6:27b" => "🔧 Coder (slow)",
+        "qwen3-coder-next:q8_0" => "🏗 Architect",
+        "codestral:22b" => "📝 Code Gen",
+        "jaahas/crow:9b" => "🐦 Lightweight",
+        "nemotron-3-nano:30b" => "🤖 Nano",
+        "ornith:35b" => "🦅 Large",
+        "gemma4:31b" => "💎 Premium",
+        _ => "",
+    }
+}
+
+/// Returns the rank number from benchmark results, if available.
+fn model_rank(model_name: &str, benchmark: Option<&BenchmarkResult>) -> Option<usize> {
+    benchmark?.ranking.iter().find(|r| r.model == model_name).map(|r| r.rank)
+}
+
 // ── Modes ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -946,7 +973,7 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) -> ClickAreas {
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(7), Constraint::Length(10), Constraint::Length(7), Constraint::Length(6), Constraint::Length(10)].as_ref())
+        .constraints([Constraint::Min(12), Constraint::Length(10), Constraint::Length(7), Constraint::Length(6), Constraint::Length(10)].as_ref())
         .split(main[0]);
 
     let right = Layout::default()
@@ -954,14 +981,57 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) -> ClickAreas {
         .constraints([Constraint::Length(3), Constraint::Min(7), Constraint::Length(8), Constraint::Length(3), Constraint::Length(1)].as_ref())
         .split(main[1]);
 
-    // ── Models ──
+    // ── Models with best-for tags and benchmark rank ──
     let model_items: Vec<ListItem> = d.models.iter().enumerate().map(|(i, m)| {
         let prefix = if i == d.selected_model { "▶ " } else { "  " };
         let loaded = if d.models_loaded.contains(&m.name) { " ●" } else { "" };
-        ListItem::new(format!("{prefix}{name} ({size}, {quant}){loaded}", name = m.name, size = m.size, quant = m.quantization))
+        let best_for = model_best_for(&m.name);
+        let rank = model_rank(&m.name, d.benchmark_result.as_ref());
+
+        // Build line 1: model name + size
+        let mut line1 = vec![
+            Span::raw(prefix),
+            Span::styled(m.name.to_string(), Style::default().fg(Color::Cyan)),
+            Span::raw(format!(" ({}, {}){loaded}", m.size, m.quantization)),
+        ];
+
+        // Add benchmark rank medal if available
+        if let Some(r) = rank {
+            let medal = match r { 1 => "🥇", 2 => "🥈", 3 => "🥉", _ => "" };
+            if !medal.is_empty() {
+                line1.push(Span::raw(" "));
+                line1.push(Span::styled(format!("{medal}#{r}"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+            } else {
+                line1.push(Span::styled(format!(" #{r}"), Style::default().fg(Color::DarkGray)));
+            }
+        }
+
+        // Line 2: best-for tag
+        let mut lines = vec![Line::from(line1)];
+        if !best_for.is_empty() {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(best_for, Style::default().fg(Color::Green)),
+            ]));
+        }
+
+        // Line 3: benchmark stats if available
+        if let Some(bench) = &d.benchmark_result {
+            if let Some(r) = bench.ranking.iter().find(|r| r.model == m.name) {
+                let tps_color = if r.avg_tps > 20.0 { Color::Green } else if r.avg_tps > 5.0 { Color::Yellow } else { Color::Red };
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(format!("{:.1} tok/s", r.avg_tps), Style::default().fg(tps_color)),
+                    Span::raw(format!(" | {}ms", r.avg_latency_ms)),
+                    Span::styled(format!(" | Q:{:.2}", r.avg_quality), Style::default().fg(Color::Yellow)),
+                ]));
+            }
+        }
+
+        ListItem::new(lines)
     }).collect();
     let model_list = List::new(model_items)
-        .block(Block::default().title("Models (↑↓ or click)").borders(Borders::ALL)
+        .block(Block::default().title("Models (↑↓ or click) — tags show best use case").borders(Borders::ALL)
             .border_style(if d.focus == Focus::ModelList { Style::default().fg(Color::Cyan) } else { Style::default() }))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
     f.render_widget(model_list, left[0]);

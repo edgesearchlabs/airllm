@@ -673,6 +673,7 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
 
         // Check for errors — retry already happened inside tokio::spawn
         if let Ok((err_msg, retry_count)) = error_rx.try_recv() {
+            d.output = format!("❌ ERROR\n\n{err_msg}\n\nPress Enter to try again or select a different model.");
             d.status = format!("✗ {err_msg}");
             d.exec_state = ExecState::Error { msg: err_msg, retries: retry_count };
         }
@@ -711,6 +712,12 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
                     }
 
                     if key.code == KeyCode::Enter && d.focus == Focus::Input {
+                        // If in error state, reset to idle and allow retry
+                        if matches!(d.exec_state, ExecState::Error { .. }) {
+                            d.exec_state = ExecState::Idle;
+                            d.status = "Ready — type and press Enter to retry".into();
+                            continue;
+                        }
                         if !d.input.trim().is_empty() && !d.exec_state.is_running() {
                             if d.mode == Mode::Benchmark {
                                 execute_benchmark(&mut d, bench_tx.clone(), bench_prog_tx.clone()).await;
@@ -851,7 +858,8 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
             // Handled by execute_benchmark
         }
     }
-    d.input.clear();
+    // Don't clear input immediately — keep it so user can edit and retry
+    // Input is cleared only when result arrives successfully
 }
 
 async fn execute_benchmark(d: &mut Dashboard, bench_tx: mpsc::Sender<BenchmarkResult>, prog_tx: mpsc::Sender<String>) {

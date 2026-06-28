@@ -35,4 +35,4 @@ pub use client::OllamaClient;
 pub use error::{OllamaError, Result};
 pub use router::ModelRouter;
 pub use stream::chat_stream;
-pub use types::{ChatOptions, Complexity, Message, MessageRole, ModelInfo};
+pub use types::{ChatMetrics, ChatOptions, Complexity, Message, MessageRole, ModelInfo};

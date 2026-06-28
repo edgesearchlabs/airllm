@@ -40,6 +40,7 @@ dependencies = [
  "crossterm",
  "futures",
  "ratatui",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

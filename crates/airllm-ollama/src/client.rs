@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::error::{OllamaError, Result};
-use crate::types::{ChatOptions, Message, ModelInfo};
+use crate::types::{ChatMetrics, ChatOptions, Message, ModelInfo};
 
 /// Async client for the Ollama HTTP API.
 #[derive(Clone)]
@@ -129,6 +129,45 @@ impl OllamaClient {
 
         let chat_resp: ChatResponse = resp.json().await?;
         Ok(chat_resp.message.content)
+    }
+
+    /// Send a non-streaming chat request and return both the response text
+    /// and detailed metrics (latency, tokens, tokens/s).
+    pub async fn chat_with_metrics(
+        &self,
+        model: &str,
+        messages: &[Message],
+        options: ChatOptions,
+    ) -> Result<(String, ChatMetrics)> {
+        let start = Instant::now();
+
+        let req = ChatRequest {
+            model,
+            messages,
+            stream: false,
+            keep_alive: Some(&self.default_keep_alive),
+            options: Some(options.clone()),
+        };
+
+        let url = format!("{}/api/chat", self.base_url);
+        debug!("POST {} (model={})", url, model);
+
+        let resp = self.http.post(&url).json(&req).send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            if status == 404 {
+                return Err(OllamaError::ModelNotFound(model.to_string()));
+            }
+            return Err(OllamaError::Http { status, body });
+        }
+
+        let chat_resp: ChatResponse = resp.json().await?;
+        let output = chat_resp.message.content;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let metrics = ChatMetrics::from_request(model, messages, &options, latency_ms, &output);
+        Ok((output, metrics))
     }
 
     /// List all models available in the Ollama instance.

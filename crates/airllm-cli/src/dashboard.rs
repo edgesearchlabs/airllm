@@ -127,7 +127,7 @@ pub struct AgentDef {
 impl AgentDef {
     pub fn all() -> Vec<AgentDef> {
         vec![
-            AgentDef { name: "Coder", model: "qwen3.6:27b", description: "Implements code from task description" },
+            AgentDef { name: "Coder", model: "qwen3.5:4b", description: "Implements code from task description" },
             AgentDef { name: "Reviewer", model: "qwen3.6:27b", description: "Reviews code for bugs, security, performance" },
             AgentDef { name: "Tester", model: "qwen3.5:4b", description: "Generates comprehensive test suites" },
             AgentDef { name: "Architect", model: "qwen3-coder-next:q8_0", description: "Designs module structure and decomposition" },

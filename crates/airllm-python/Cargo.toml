@@ -1,0 +1,18 @@
+[package]
+name = "airllm-python"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+airllm-orchestrator = { workspace = true }
+airllm-ollama = { workspace = true }
+anyhow = { workspace = true }
+pyo3 = { version = "0.22", features = ["auto-initialize"] }
+tokio = { workspace = true, features = ["full"] }
+
+[lib]
+name = "airllm_python"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]

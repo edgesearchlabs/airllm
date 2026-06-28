@@ -1,0 +1,9 @@
+name = "refactorer"
+default_model = "qwen3.6:27b"
+fallback_model = "granite4.1:30b"
+system_prompt = "../prompts/refactorer.md"
+parallelizable = true
+max_concurrent = 2
+temperature = 0.15
+top_p = 0.9
+routing_patterns = ["refactor", "cleanup", "modernize"]

@@ -1,0 +1,9 @@
+name = "documenter"
+default_model = "jaahas/crow:9b"
+fallback_model = "qwen3.5:4b"
+system_prompt = "../prompts/documenter.md"
+parallelizable = true
+max_concurrent = 2
+temperature = 0.3
+top_p = 0.9
+routing_patterns = ["document", "readme", "docs"]

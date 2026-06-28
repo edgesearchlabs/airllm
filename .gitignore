@@ -5,3 +5,28 @@ airllm.egg-info
 build
 dist
 __pycache__
+
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Python
+*.egg-info/
+.venv/
+.env
+.benchmark_tmp/
+
+# Generated benchmark artifacts
+benchmark_results/*.class
+benchmark_results/HelloWorld_*.java
+benchmark_results/Calculator_*.java
+.github/agents
+.github/workflows
+.github/skills
+.github/brand
+.github/hooks
+.github/copilot-instructions.md
+.edgesearch
+*edgesearch*
+*agentes-development*

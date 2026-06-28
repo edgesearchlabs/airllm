@@ -39,7 +39,7 @@ pub struct ScheduledJob {
 
 /// How a job is triggered.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(untagged)]
 pub enum Trigger {
     /// Cron expression (e.g. "0 9 * * * *" = every day at 9am).
     Cron {

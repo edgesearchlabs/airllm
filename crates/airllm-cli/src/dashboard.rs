@@ -1,4 +1,4 @@
-//! Interactive TUI dashboard for AirLLM — modes, agents, models, metrics, orchestration.
+//! Interactive TUI dashboard for AirLLM — clickable, branded, with execution indicators and API config.
 
 use std::io::{stdout, Write};
 use std::time::{Duration, Instant};
@@ -6,20 +6,23 @@ use std::time::{Duration, Instant};
 use airllm_ollama::{ChatOptions, ChatMetrics, Message, ModelInfo, OllamaClient};
 use airllm_orchestrator::{CodeRequest, Orchestrator};
 use anyhow::Result;
-use crossterm::event::{poll, read, Event, KeyCode, KeyEventKind};
+use crossterm::event::{poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEvent, MouseEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
+// ── Branding ────────────────────────────────────────────────────────────────
+
+const EDGESEARCH_BRAND: &str = "⬡ EdgeSearch";
+
 // ── Modes ──────────────────────────────────────────────────────────────────
 
-/// Operation mode — determines what happens when Enter is pressed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Chat,
@@ -98,13 +101,14 @@ impl AgentDef {
 
 // ── Focus ──────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Input,
     ModeBar,
     ModelList,
     AgentList,
     Params,
+    ApiConfig,
 }
 
 impl Focus {
@@ -115,7 +119,8 @@ impl Focus {
             Focus::ModeBar => Focus::ModelList,
             Focus::ModelList => Focus::AgentList,
             Focus::AgentList => Focus::Params,
-            Focus::Params => Focus::Input,
+            Focus::Params => Focus::ApiConfig,
+            Focus::ApiConfig => Focus::Input,
         }
     }
 
@@ -126,7 +131,67 @@ impl Focus {
             Focus::ModelList => "Models",
             Focus::AgentList => "Agents",
             Focus::Params => "Params",
+            Focus::ApiConfig => "APIs",
         }
+    }
+}
+
+// ── Execution State ─────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub enum ExecState {
+    Idle,
+    Running { started: Instant, #[allow(dead_code)] mode_label: String },
+    Done,
+}
+
+impl ExecState {
+    pub fn is_running(&self) -> bool {
+        matches!(self, ExecState::Running { .. })
+    }
+
+    pub fn spinner(&self) -> char {
+        match self {
+            ExecState::Running { started, .. } => {
+                let elapsed = started.elapsed().as_millis();
+                let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                frames[(elapsed / 100) as usize % frames.len()]
+            }
+            ExecState::Done => '✓',
+            ExecState::Idle => '○',
+        }
+    }
+
+    pub fn elapsed_secs(&self) -> f64 {
+        match self {
+            ExecState::Running { started, .. } => started.elapsed().as_secs_f64(),
+            _ => 0.0,
+        }
+    }
+}
+
+// ── API Config ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct ApiConfig {
+    pub name: String,
+    pub env_var: String,
+    pub configured: bool,
+    pub description: String,
+}
+
+impl ApiConfig {
+    pub fn all() -> Vec<ApiConfig> {
+        vec![
+            ApiConfig { name: "Twitter/X".into(), env_var: "SOCIAL_API_KEY".into(), configured: std::env::var("SOCIAL_API_KEY").is_ok(), description: "Post to Twitter/X".into() },
+            ApiConfig { name: "LinkedIn".into(), env_var: "LINKEDIN_API_KEY".into(), configured: std::env::var("LINKEDIN_API_KEY").is_ok(), description: "Post to LinkedIn".into() },
+            ApiConfig { name: "Telegram".into(), env_var: "TELEGRAM_BOT_TOKEN".into(), configured: std::env::var("TELEGRAM_BOT_TOKEN").is_ok(), description: "Send Telegram messages".into() },
+            ApiConfig { name: "Slack".into(), env_var: "SLACK_WEBHOOK_URL".into(), configured: std::env::var("SLACK_WEBHOOK_URL").is_ok(), description: "Send Slack messages".into() },
+            ApiConfig { name: "Discord".into(), env_var: "DISCORD_WEBHOOK_URL".into(), configured: std::env::var("DISCORD_WEBHOOK_URL").is_ok(), description: "Send Discord messages".into() },
+            ApiConfig { name: "SMTP Email".into(), env_var: "SMTP_HOST".into(), configured: std::env::var("SMTP_HOST").is_ok(), description: "Send emails via SMTP".into() },
+            ApiConfig { name: "WebSearch".into(), env_var: "FIRECRAWL_API_KEY".into(), configured: std::env::var("FIRECRAWL_API_KEY").is_ok(), description: "Web search via Firecrawl".into() },
+            ApiConfig { name: "GitHub".into(), env_var: "GITHUB_TOKEN".into(), configured: std::env::var("GITHUB_TOKEN").is_ok(), description: "GitHub API access".into() },
+        ]
     }
 }
 
@@ -149,8 +214,10 @@ pub struct Dashboard {
     orchestrator: Orchestrator,
     models: Vec<ModelInfo>,
     agents: Vec<AgentDef>,
+    apis: Vec<ApiConfig>,
     selected_model: usize,
     selected_agent: usize,
+    selected_api: usize,
     mode: Mode,
     temperature: f32,
     top_p: f32,
@@ -167,6 +234,8 @@ pub struct Dashboard {
     focus: Focus,
     autonomous_running: bool,
     autonomous_cycles: u64,
+    exec_state: ExecState,
+    tick: u64,
 }
 
 impl Dashboard {
@@ -178,8 +247,10 @@ impl Dashboard {
             orchestrator,
             models: Vec::new(),
             agents: AgentDef::all(),
+            apis: ApiConfig::all(),
             selected_model: 0,
             selected_agent: 0,
+            selected_api: 0,
             mode: Mode::Chat,
             temperature: 0.7,
             top_p: 0.9,
@@ -196,13 +267,15 @@ impl Dashboard {
             focus: Focus::Input,
             autonomous_running: false,
             autonomous_cycles: 0,
+            exec_state: ExecState::Idle,
+            tick: 0,
         }
     }
 
     async fn refresh_models(&mut self) {
         match self.ollama.list_models().await {
             Ok(models) => {
-                self.status = format!("Loaded {} models, {} agents", models.len(), self.agents.len());
+                self.status = format!("Loaded {} models, {} agents, {} APIs", models.len(), self.agents.len(), self.apis.iter().filter(|a| a.configured).count());
                 self.models = models;
             }
             Err(e) => {
@@ -323,11 +396,134 @@ impl Dashboard {
                 KeyCode::Down => { self.temperature = (self.temperature - 0.1).max(0.0); false }
                 KeyCode::Left => { self.top_p = (self.top_p - 0.05).max(0.0); false }
                 KeyCode::Right => { self.top_p = (self.top_p + 0.05).min(1.0); false }
+                KeyCode::Tab => { self.focus = Focus::ApiConfig; self.status = format!("Focus: {} — ↑↓ to view APIs", self.focus.label()); false }
+                KeyCode::Esc => true,
+                _ => false,
+            },
+            Focus::ApiConfig => match key {
+                KeyCode::Up => { if self.selected_api > 0 { self.selected_api -= 1; } false }
+                KeyCode::Down => { if self.selected_api + 1 < self.apis.len() { self.selected_api += 1; } false }
                 KeyCode::Tab => { self.focus = Focus::Input; self.status = "Focus: Input".into(); false }
                 KeyCode::Esc => true,
                 _ => false,
             },
         }
+    }
+
+    fn handle_mouse(&mut self, event: MouseEvent, areas: &ClickAreas) {
+        // Mode bar click
+        if areas.mode_bar_contains(event.column, event.row) {
+            self.focus = Focus::ModeBar;
+            // Determine which mode was clicked based on x position
+            let mode_widths: Vec<usize> = Mode::all().iter().map(|m| m.label().len() + 4).collect();
+            let mut x_start: u16 = areas.mode_bar.x + 1;
+            for (i, w) in mode_widths.iter().enumerate() {
+                if event.column >= x_start && event.column < x_start + *w as u16 {
+                    self.mode = Mode::all()[i];
+                    self.status = format!("Mode: {} — {}", self.mode.label(), self.mode.description());
+                    return;
+                }
+                x_start += *w as u16;
+            }
+            return;
+        }
+
+        // Model list click
+        if areas.model_list_contains(event.column, event.row) {
+            self.focus = Focus::ModelList;
+            if event.row > areas.model_list.y {
+                let row = event.row - areas.model_list.y - 1;
+                if (row as usize) < self.models.len() {
+                    self.selected_model = row as usize;
+                    self.status = format!("Model: {}", self.models[self.selected_model].name);
+                }
+            }
+        }
+
+        // Agent list click
+        if areas.agent_list_contains(event.column, event.row) {
+            self.focus = Focus::AgentList;
+            if event.row > areas.agent_list.y {
+                let row = event.row - areas.agent_list.y - 1;
+                let agent_idx = (row / 2) as usize;
+                if agent_idx < self.agents.len() {
+                    self.selected_agent = agent_idx;
+                    self.status = format!("Agent: {}", self.agents[self.selected_agent].name);
+                }
+            }
+            return;
+        }
+
+        // Input click
+        if areas.input_contains(event.column, event.row) {
+            self.focus = Focus::Input;
+            self.status = "Focus: Input — type and Enter".into();
+            return;
+        }
+
+        // Params click
+        if areas.params_contains(event.column, event.row) {
+            self.focus = Focus::Params;
+            self.status = "Focus: Params — ↑↓ temp, ←→ top_p".into();
+            return;
+        }
+
+        // API config click
+        if areas.api_config_contains(event.column, event.row) {
+            self.focus = Focus::ApiConfig;
+            if event.row > areas.api_config.y {
+                let row = event.row - areas.api_config.y - 1;
+                if (row as usize) < self.apis.len() {
+                    self.selected_api = row as usize;
+                    self.status = format!("API: {} ({})", self.apis[self.selected_api].name,
+                        if self.apis[self.selected_api].configured { "✓ configured" } else { "✗ not set" });
+                }
+            }
+        }
+    }
+}
+
+// ── Click Areas ─────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+struct ClickAreas {
+    mode_bar: Rect,
+    model_list: Rect,
+    agent_list: Rect,
+    input: Rect,
+    params: Rect,
+    api_config: Rect,
+}
+
+impl ClickAreas {
+    fn mode_bar_contains(&self, x: u16, y: u16) -> bool {
+        self.mode_bar.x <= x && x < self.mode_bar.x + self.mode_bar.width
+            && self.mode_bar.y <= y && y < self.mode_bar.y + self.mode_bar.height
+    }
+
+    fn model_list_contains(&self, x: u16, y: u16) -> bool {
+        self.model_list.x <= x && x < self.model_list.x + self.model_list.width
+            && self.model_list.y <= y && y < self.model_list.y + self.model_list.height
+    }
+
+    fn agent_list_contains(&self, x: u16, y: u16) -> bool {
+        self.agent_list.x <= x && x < self.agent_list.x + self.agent_list.width
+            && self.agent_list.y <= y && y < self.agent_list.y + self.agent_list.height
+    }
+
+    fn input_contains(&self, x: u16, y: u16) -> bool {
+        self.input.x <= x && x < self.input.x + self.input.width
+            && self.input.y <= y && y < self.input.y + self.input.height
+    }
+
+    fn params_contains(&self, x: u16, y: u16) -> bool {
+        self.params.x <= x && x < self.params.x + self.params.width
+            && self.params.y <= y && y < self.params.y + self.params.height
+    }
+
+    fn api_config_contains(&self, x: u16, y: u16) -> bool {
+        self.api_config.x <= x && x < self.api_config.x + self.api_config.width
+            && self.api_config.y <= y && y < self.api_config.y + self.api_config.height
     }
 }
 
@@ -336,7 +532,7 @@ impl Dashboard {
 pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -344,12 +540,21 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
     let mut d = Dashboard::new(ollama_url);
     d.refresh_models().await;
     d.refresh_system().await;
-    d.status = "Ready. Tab=switch | ←→=mode | ↑↓=select | Enter=execute | Esc=quit".into();
+    d.status = "Ready. Tab=switch | ←→=mode | ↑↓=select | Enter=execute | Click=focus | Esc=quit".into();
 
     let (result_tx, mut result_rx) = mpsc::channel::<DashboardResult>(10);
     let mut last_refresh = Instant::now();
+    let mut click_areas = ClickAreas {
+        mode_bar: Rect::default(),
+        model_list: Rect::default(),
+        agent_list: Rect::default(),
+        input: Rect::default(),
+        params: Rect::default(),
+        api_config: Rect::default(),
+    };
 
     loop {
+        // Check for async results
         if let Ok(res) = result_rx.try_recv() {
             d.output = res.response.clone();
             d.metrics = Some(res.metrics.clone());
@@ -364,34 +569,51 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
                 prompt: d.input.clone(), response: res.response, metrics: res.metrics,
             });
             d.input.clear();
+            d.exec_state = ExecState::Done;
             if d.mode == Mode::Autonomous { d.autonomous_cycles += 1; }
         }
 
+        // Periodic refresh
         if last_refresh.elapsed() > Duration::from_secs(5) {
             d.refresh_system().await;
             last_refresh = Instant::now();
         }
 
-        terminal.draw(|f| draw_dashboard(f, &d))?;
+        // Tick counter for spinner animation
+        d.tick += 1;
 
+        // Draw
+        terminal.draw(|f| {
+            click_areas = draw_dashboard(f, &d);
+        })?;
+
+        // Poll for input (non-blocking)
         if poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = read()? {
-                if key.kind != KeyEventKind::Press { continue; }
+            match read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press { continue; }
 
-                if key.code == KeyCode::Enter && d.focus == Focus::Input {
-                    if !d.input.trim().is_empty() {
-                        execute_action(&mut d, result_tx.clone()).await;
+                    if key.code == KeyCode::Enter && d.focus == Focus::Input {
+                        if !d.input.trim().is_empty() && !d.exec_state.is_running() {
+                            execute_action(&mut d, result_tx.clone()).await;
+                        }
+                        continue;
                     }
-                    continue;
-                }
 
-                if d.handle_key(key.code) { break; }
+                    if d.handle_key(key.code) { break; }
+                }
+                Event::Mouse(mouse) => {
+                    if mouse.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) {
+                        d.handle_mouse(mouse, &click_areas);
+                    }
+                }
+                _ => {}
             }
         }
     }
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.backend_mut().flush()?;
     Ok(())
 }
@@ -416,7 +638,8 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>) {
     let top_k_val = d.top_k;
     let ctx = d.num_ctx;
 
-    d.status = format!("Executing {} via {} ({})...", mode.label(), agent_name, model);
+    d.exec_state = ExecState::Running { started: Instant::now(), mode_label: mode_label.clone() };
+    d.status = format!("⠿ Executing {} via {} ({})...", mode.label(), agent_name, model);
 
     match mode {
         Mode::Chat => {
@@ -461,7 +684,7 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>) {
 
 // ── Draw ────────────────────────────────────────────────────────────────────
 
-fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
+fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) -> ClickAreas {
     let area = f.area();
 
     let top = Layout::default()
@@ -469,7 +692,7 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
         .constraints([Constraint::Length(3), Constraint::Min(1)].as_ref())
         .split(area);
 
-    // ── Mode bar ──
+    // ── Mode bar with branding ──
     let mode_spans: Vec<Span> = Mode::all()
         .iter()
         .map(|m| {
@@ -480,10 +703,16 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
             }
         })
         .collect();
-    let mode_bar = Paragraph::new(Text::from(Line::from(mode_spans)))
+    let mut mode_line_spans = mode_spans;
+    // Add branding on the right
+    let brand_span = Span::styled(format!(" {brand} ", brand = EDGESEARCH_BRAND), Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+    mode_line_spans.push(Span::raw("  "));
+    mode_line_spans.push(brand_span);
+
+    let mode_bar = Paragraph::new(Text::from(Line::from(mode_line_spans)))
         .block(
             Block::default()
-                .title(format!("Mode (←→) | Agent: {} | Model: {}", d.current_agent_name(), d.current_model()))
+                .title(format!("Mode (←→ or click) | Agent: {} | Model: {}", d.current_agent_name(), d.current_model()))
                 .borders(Borders::ALL)
                 .border_style(if d.focus == Focus::ModeBar { Style::default().fg(Color::Cyan) } else { Style::default() }),
         );
@@ -496,12 +725,12 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(8), Constraint::Length(10), Constraint::Length(8), Constraint::Length(6)].as_ref())
+        .constraints([Constraint::Min(7), Constraint::Length(10), Constraint::Length(7), Constraint::Length(6), Constraint::Length(10)].as_ref())
         .split(main[0]);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(8), Constraint::Length(8), Constraint::Length(3), Constraint::Length(1)].as_ref())
+        .constraints([Constraint::Length(3), Constraint::Min(7), Constraint::Length(8), Constraint::Length(3), Constraint::Length(1)].as_ref())
         .split(main[1]);
 
     // ── Models ──
@@ -511,7 +740,7 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
         ListItem::new(format!("{prefix}{name} ({size}, {quant}){loaded}", name = m.name, size = m.size, quant = m.quantization))
     }).collect();
     let model_list = List::new(model_items)
-        .block(Block::default().title("Models (↑↓)").borders(Borders::ALL)
+        .block(Block::default().title("Models (↑↓ or click)").borders(Borders::ALL)
             .border_style(if d.focus == Focus::ModelList { Style::default().fg(Color::Cyan) } else { Style::default() }))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
     f.render_widget(model_list, left[0]);
@@ -523,7 +752,7 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
         ListItem::new(format!("{prefix}{name} [{model}]\n   {desc}", name = a.name, model = model_tag, desc = a.description))
     }).collect();
     let agent_list = List::new(agent_items)
-        .block(Block::default().title("Agents (↑↓)").borders(Borders::ALL)
+        .block(Block::default().title("Agents (↑↓ or click)").borders(Borders::ALL)
             .border_style(if d.focus == Focus::AgentList { Style::default().fg(Color::Magenta) } else { Style::default() }))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
     f.render_widget(agent_list, left[1]);
@@ -536,7 +765,7 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
         Line::from(vec![Span::styled("Ctx:  ", Style::default().fg(Color::Yellow)), Span::raw(format!("{} tok", d.num_ctx))]),
     ];
     let params = Paragraph::new(Text::from(params_text))
-        .block(Block::default().title("Params").borders(Borders::ALL)
+        .block(Block::default().title("Params (click to focus)").borders(Borders::ALL)
             .border_style(if d.focus == Focus::Params { Style::default().fg(Color::Cyan) } else { Style::default() }));
     f.render_widget(params, left[2]);
 
@@ -551,7 +780,31 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
     ];
     f.render_widget(Paragraph::new(Text::from(sys_text)).block(Block::default().title("System").borders(Borders::ALL)), left[3]);
 
-    // ── Input ──
+    // ── API Config ──
+    let api_items: Vec<ListItem> = d.apis.iter().enumerate().map(|(i, a)| {
+        let prefix = if i == d.selected_api { "▶ " } else { "  " };
+        let status_icon = if a.configured { "✓" } else { "✗" };
+        let status_color = if a.configured { Color::Green } else { Color::Red };
+        ListItem::new(vec![
+            Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(a.name.to_string(), Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(status_icon, Style::default().fg(status_color)),
+                Span::raw(format!("  {desc}", desc = a.description)),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("   env: {env}", env = a.env_var), Style::default().fg(Color::DarkGray)),
+            ]),
+        ])
+    }).collect();
+    let api_list = List::new(api_items)
+        .block(Block::default().title("External APIs (↑↓ or click)").borders(Borders::ALL)
+            .border_style(if d.focus == Focus::ApiConfig { Style::default().fg(Color::Yellow) } else { Style::default() }))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    f.render_widget(api_list, left[4]);
+
+    // ── Input with execution indicator ──
     let input_hint = match d.mode {
         Mode::Chat => "chat message",
         Mode::Code => "code task description",
@@ -561,14 +814,49 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
         Mode::Autonomous => "task for autonomous loop",
     };
     let input_style = if d.focus == Focus::Input { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) };
+
+    // Execution indicator prefix
+    let spinner = d.exec_state.spinner();
+    let exec_prefix = match &d.exec_state {
+        ExecState::Running { mode_label: _, .. } => format!("{} ", spinner),
+        ExecState::Done => "✓ ".into(),
+        ExecState::Idle => "○ ".into(),
+    };
+    let exec_color = match &d.exec_state {
+        ExecState::Running { .. } => Color::Yellow,
+        ExecState::Done => Color::Green,
+        ExecState::Idle => Color::DarkGray,
+    };
+
+    let input_text = if d.exec_state.is_running() {
+        format!("{} {} (running {:.1}s)...", spinner, d.input, d.exec_state.elapsed_secs())
+    } else {
+        format!("{}> {}", exec_prefix, d.input)
+    };
+
     f.render_widget(
-        Paragraph::new(format!("> {}", d.input))
-            .block(Block::default().title(format!("Input ({input_hint}) — Enter=execute")).borders(Borders::ALL).border_style(input_style)),
+        Paragraph::new(input_text)
+            .block(Block::default().title(format!("Input ({input_hint}) — Enter=execute | Click to focus")).borders(Borders::ALL)
+                .border_style(input_style)),
         right[0],
     );
 
+    // Render spinner color overlay
+    if d.exec_state.is_running() {
+        let spinner_area = Rect { x: right[0].x + 1, y: right[0].y + 1, width: 1, height: 1 };
+        f.render_widget(Paragraph::new(Span::styled(format!("{}", spinner), Style::default().fg(exec_color).add_modifier(Modifier::BOLD))), spinner_area);
+    }
+
     // ── Output ──
-    let output_text = if d.output.is_empty() { Text::raw("(output will appear here)") } else { Text::raw(d.output.clone()) };
+    let output_text = if d.output.is_empty() {
+        if d.exec_state.is_running() {
+            Text::raw(format!("⠿ Processing... {:.1}s elapsed", d.exec_state.elapsed_secs()))
+        } else {
+            Text::raw("(output will appear here)")
+        }
+    } else {
+        Text::raw(d.output.clone())
+    };
     f.render_widget(
         Paragraph::new(output_text).wrap(Wrap { trim: false })
             .block(Block::default().title("Output").borders(Borders::ALL).border_style(Style::default().fg(Color::Green))),
@@ -605,11 +893,30 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) {
     };
     f.render_widget(Paragraph::new(Text::from(history_text)).block(Block::default().title("History").borders(Borders::ALL)), right[3]);
 
-    // ── Status ──
+    // ── Status bar with execution indicator ──
     let auto_indicator = if d.autonomous_running { format!(" AUTO[{}c] | ", d.autonomous_cycles) } else { " ".into() };
+    let exec_indicator = match &d.exec_state {
+        ExecState::Running { mode_label: _, .. } => format!("{} {:.1}s | ", d.exec_state.spinner(), d.exec_state.elapsed_secs()),
+        ExecState::Done => "✓ | ".into(),
+        ExecState::Idle => "".into(),
+    };
+    let status_style = match &d.exec_state {
+        ExecState::Running { .. } => Style::default().fg(Color::Black).bg(Color::Yellow),
+        ExecState::Done => Style::default().fg(Color::Black).bg(Color::Green),
+        ExecState::Idle => Style::default().fg(Color::Black).bg(Color::Yellow),
+    };
     f.render_widget(
-        Paragraph::new(format!("{}{} ", auto_indicator, d.status))
-            .style(Style::default().fg(Color::Black).bg(Color::Yellow)),
+        Paragraph::new(format!("{}{}{} ", auto_indicator, exec_indicator, d.status))
+            .style(status_style),
         right[4],
     );
+
+    ClickAreas {
+        mode_bar: top[0],
+        model_list: left[0],
+        agent_list: left[1],
+        input: right[0],
+        params: left[2],
+        api_config: left[4],
+    }
 }

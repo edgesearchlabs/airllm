@@ -373,6 +373,7 @@ impl Dashboard {
         }
     }
 
+    #[allow(dead_code)]
     async fn refresh_system(&mut self) {
         let url = format!("{}/api/ps", self.ollama.base_url());
         if let Ok(resp) = reqwest::get(&url).await {
@@ -644,6 +645,7 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
     let (error_tx, mut error_rx) = mpsc::channel::<(String, u32)>(10);
     let (bench_tx, mut bench_rx) = mpsc::channel::<BenchmarkResult>(10);
     let (bench_prog_tx, mut bench_prog_rx) = mpsc::channel::<String>(10);
+    let (sys_tx, mut sys_rx) = mpsc::channel::<(u64, u64, Vec<String>)>(5);
 
     let mut last_refresh = Instant::now();
     let mut click_areas = ClickAreas {
@@ -690,9 +692,54 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
             d.status = "✓ Benchmark complete — see ranking in output".into();
         }
 
-        // Periodic refresh
-        if last_refresh.elapsed() > Duration::from_secs(5) {
-            d.refresh_system().await;
+        // Check for system refresh results (non-blocking)
+        if let Ok((vram_total, vram_used, models_loaded)) = sys_rx.try_recv() {
+            d.vram_total_mb = vram_total;
+            d.vram_used_mb = vram_used;
+            d.models_loaded = models_loaded;
+        }
+
+        // Periodic refresh — spawn to background, never block the UI loop
+        if last_refresh.elapsed() > Duration::from_secs(10) {
+            let url = d.ollama.base_url().to_string();
+            let sys_tx_clone = sys_tx.clone();
+            tokio::spawn(async move {
+                let mut vram_total = 0u64;
+                let mut vram_used = 0u64;
+
+                // Query /api/ps
+                let ps_url = format!("{url}/api/ps");
+                let mut models_loaded = Vec::new();
+                if let Ok(resp) = reqwest::get(&ps_url).await {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if let Some(models) = json.get("models").and_then(|m| m.as_array()) {
+                            models_loaded = models
+                                .iter()
+                                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                                .collect();
+                        }
+                    }
+                }
+
+                // Query nvidia-smi (fast, non-blocking)
+                if let Ok(output) = std::process::Command::new("nvidia-smi")
+                    .args(["--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits"])
+                    .output()
+                {
+                    if output.status.success() {
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        if let Some(line) = text.lines().next() {
+                            let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                            if parts.len() >= 2 {
+                                vram_total = parts[0].parse().unwrap_or(0);
+                                vram_used = parts[1].parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+
+                let _ = sys_tx_clone.send((vram_total, vram_used, models_loaded)).await;
+            });
             last_refresh = Instant::now();
         }
 
@@ -700,7 +747,7 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
 
         terminal.draw(|f| { click_areas = draw_dashboard(f, &d); })?;
 
-        if poll(Duration::from_millis(100))? {
+        if poll(Duration::from_millis(50))? {
             match read()? {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press { continue; }

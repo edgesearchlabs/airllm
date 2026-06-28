@@ -84,10 +84,15 @@ struct ModelDetails {
 
 impl OllamaClient {
     /// Create a new client pointing at the given Ollama base URL
-    /// (e.g. `http://localhost:11434`).
+    /// (e.g. `http://localhost:11434`) with a 300s default timeout.
     pub fn new(base_url: &str) -> Self {
+        Self::new_with_timeout(base_url, Duration::from_secs(300))
+    }
+
+    /// Create a new client with a custom request timeout.
+    pub fn new_with_timeout(base_url: &str, timeout: Duration) -> Self {
         let http = Client::builder()
-            .timeout(Duration::from_secs(300))
+            .timeout(timeout)
             .build()
             .expect("failed to build reqwest client");
         Self {

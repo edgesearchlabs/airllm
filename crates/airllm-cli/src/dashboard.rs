@@ -35,14 +35,22 @@ fn model_best_for(model_name: &str) -> &'static str {
         "gemma4:12b" => "💬 General",
         "codegemma:7b" => "⚡ Quick",
         "qwen3.6:27b" => "🔧 Coder (slow)",
-        "qwen3-coder-next:q8_0" => "🏗 Architect",
+        "qwen3-coder-next:q8_0" => "🏗 Architect (⚠ 84GB slow)",
         "codestral:22b" => "📝 Code Gen",
         "jaahas/crow:9b" => "🐦 Lightweight",
         "nemotron-3-nano:30b" => "🤖 Nano",
-        "ornith:35b" => "🦅 Large",
-        "gemma4:31b" => "💎 Premium",
+        "ornith:35b" => "🦅 Large (slow)",
+        "gemma4:31b" => "💎 Premium (slow)",
         _ => "",
     }
+}
+
+/// Returns true if the model is large (>20GB) and may timeout in TUI.
+fn is_large_model(model_name: &str) -> bool {
+    matches!(model_name,
+        "qwen3-coder-next:q8_0" | "qwen3.6:27b" | "granite4.1:30b" |
+        "ornith:35b" | "gemma4:31b" | "codestral:22b" | "nemotron-3-nano:30b"
+    )
 }
 
 /// Returns the rank number from benchmark results, if available.
@@ -318,7 +326,8 @@ pub struct Dashboard {
 
 impl Dashboard {
     pub fn new(ollama_url: &str) -> Self {
-        let ollama = OllamaClient::new(ollama_url);
+        // Use 120s timeout — enough for most models, prevents 300s hangs on large models
+        let ollama = OllamaClient::new_with_timeout(ollama_url, Duration::from_secs(120));
         let orchestrator = Orchestrator::new(ollama.clone());
         Self {
             ollama,
@@ -771,7 +780,7 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
                 let messages = vec![Message::system("You are a helpful coding assistant."), Message::user(&prompt)];
                 let options = ChatOptions { temperature: temp, top_p: top_p_val, top_k: top_k_val, num_ctx: ctx };
 
-                // Retry logic
+                // Retry only on connection errors (not timeout — timeout means model is too slow)
                 for attempt in 0..3u32 {
                     if cancel.load(Ordering::SeqCst) { return; }
                     match ollama.chat_with_metrics(&model, &messages, options.clone()).await {
@@ -781,11 +790,18 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
                         }
                         Err(e) => {
                             let err_str = e.to_string();
-                            if attempt < 2 {
+                            let is_timeout = err_str.contains("timeout") || err_str.contains("elapsed") || err_str.contains("timed out");
+                            if attempt < 2 && !is_timeout {
                                 tracing::warn!("chat error (attempt {}): {err_str} — retrying in 2s", attempt + 1);
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                             } else {
-                                let _ = err_tx.send((err_str, attempt)).await;
+                                let msg = if is_timeout {
+                                    format!("Timeout (120s) — model '{model}' is too large. Try a smaller model or use CLI with --model. Error: {err_str}")
+                                } else {
+                                    err_str
+                                };
+                                let _ = err_tx.send((msg, attempt)).await;
+                                return;
                             }
                         }
                     }
@@ -817,11 +833,18 @@ async fn execute_action(d: &mut Dashboard, tx: mpsc::Sender<DashboardResult>, er
                         }
                         Err(e) => {
                             let err_str = e.to_string();
-                            if attempt < 2 {
+                            let is_timeout = err_str.contains("timeout") || err_str.contains("elapsed") || err_str.contains("timed out");
+                            if attempt < 2 && !is_timeout {
                                 tracing::warn!("orchestrator error (attempt {}): {err_str} — retrying in 2s", attempt + 1);
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                             } else {
-                                let _ = err_tx.send((err_str, attempt)).await;
+                                let msg = if is_timeout {
+                                    format!("Timeout (120s) — model '{model}' is too large for TUI. Use CLI: airllm chat --model {model} --prompt \"...\"")
+                                } else {
+                                    err_str
+                                };
+                                let _ = err_tx.send((msg, attempt)).await;
+                                return;
                             }
                         }
                     }
@@ -1006,13 +1029,18 @@ fn draw_dashboard(f: &mut ratatui::Frame<'_>, d: &Dashboard) -> ClickAreas {
             }
         }
 
-        // Line 2: best-for tag
+        // Line 2: best-for tag + large model warning
         let mut lines = vec![Line::from(line1)];
         if !best_for.is_empty() {
-            lines.push(Line::from(vec![
+            let mut tag_spans = vec![
                 Span::raw("   "),
                 Span::styled(best_for, Style::default().fg(Color::Green)),
-            ]));
+            ];
+            if is_large_model(&m.name) {
+                tag_spans.push(Span::raw("  "));
+                tag_spans.push(Span::styled("⚠ slow (>120s)", Style::default().fg(Color::Red)));
+            }
+            lines.push(Line::from(tag_spans));
         }
 
         // Line 3: benchmark stats if available

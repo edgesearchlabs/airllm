@@ -1,0 +1,21 @@
+[package]
+name = "airllm-training"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+airllm-ollama = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { workspace = true }
+
+[lib]
+name = "airllm_training"
+path = "src/lib.rs"

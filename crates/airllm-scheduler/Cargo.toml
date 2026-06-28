@@ -1,0 +1,21 @@
+[package]
+name = "airllm-scheduler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+toml = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.12"
+
+[lib]
+name = "airllm_scheduler"
+path = "src/lib.rs"

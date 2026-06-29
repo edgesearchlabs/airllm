@@ -109,31 +109,27 @@ async fn chat_completions(
     }
 
     // Convert OpenAI messages to Ollama messages.
-    // Replace the frontend's system prompt with a minimal one for local models.
-    // The OpenAirLLM/Ink frontend sends 3000+ token system prompts that kill
-    // performance on small local models. We replace it with a concise prompt
-    // that preserves the essential instructions.
+    // The frontend's system prompt contains tool instructions (XML format)
+    // that the model needs to know how to call tools. We must preserve these.
+    // For local models, we truncate very large prompts but keep the tool
+    // instructions at the end (which is where OpenAirLLM puts them).
+    const MAX_SYSTEM_PROMPT: usize = 2000;
     let messages: Vec<Message> = req
         .messages
         .iter()
         .map(|m| {
-            if m.role == "system" {
-                // Replace any system prompt > 200 chars with a minimal version
-                // that keeps the key instructions but removes the bloat.
-                if m.content.len() > 200 {
-                    tracing::info!(
-                        original_len = m.content.len(),
-                        "Replacing large system prompt with minimal version for local model"
-                    );
-                    Message::system(
-                        "You are a helpful coding assistant. Be concise. \
-                         Use available tools when needed. Answer directly."
-                    )
-                } else {
-                    Message::system(&m.content)
-                }
+            if m.role == "system" && m.content.len() > MAX_SYSTEM_PROMPT {
+                // Keep the first 500 chars (identity) + last 1500 chars (tool instructions)
+                let first_part = &m.content[..500.min(m.content.len())];
+                let last_part = &m.content[m.content.len().saturating_sub(1500)..];
+                tracing::info!(
+                    original_len = m.content.len(),
+                    "Truncating system prompt for local model (keeping tool instructions)"
+                );
+                Message::system(format!("{first_part}\n\n[...truncated...]\n\n{last_part}"))
             } else {
                 match m.role.as_str() {
+                    "system" => Message::system(&m.content),
                     "assistant" => Message::assistant(&m.content),
                     _ => Message::user(&m.content),
                 }

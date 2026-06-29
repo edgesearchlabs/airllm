@@ -7,9 +7,9 @@
  * parses theme values with `parseRGB`, which only matches `rgb(...)` strings.
  */
 
-export const BRAND_NAME = 'OpenAirLLM'
+export const BRAND_NAME = 'By Air LLM EdgeSearch'
 
-export const BRAND_TAGLINE = 'Open terminal for any LLM'
+export const BRAND_TAGLINE = 'By Air LLM EdgeSearch'
 
 /** gitlawb orange (#ff7a1a) in the rgb() form required by theme consumers. */
 export const BRAND_ACCENT_RGB = 'rgb(255,122,26)'

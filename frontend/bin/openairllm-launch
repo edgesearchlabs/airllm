@@ -43,6 +43,10 @@ export CLAUDE_CODE_USE_OPENAI=1
 export OPENAI_BASE_URL="http://${BRIDGE_ADDR}/v1"
 export OPENAI_MODEL="$DEFAULT_MODEL"
 
+# Use simple system prompt for local models (avoids 3000+ token system prompt
+# that kills performance on small models like qwen3.5:4b)
+export CLAUDE_CODE_SIMPLE=1
+
 # Start the frontend
 node "$SCRIPT_DIR/openairllm" "$@"
 

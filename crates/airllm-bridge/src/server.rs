@@ -90,15 +90,31 @@ async fn chat_completions(
         "bridge: /v1/chat/completions"
     );
 
-    // Convert OpenAI messages to Ollama messages — pass through as-is.
-    // The frontend's system prompt and tool definitions are preserved.
+    // Convert OpenAI messages to Ollama messages.
+    // Truncate system prompt to 500 chars for local models — the full
+    // OpenAirLLM system prompt is 3000+ tokens which kills performance
+    // on small models. The frontend's CLAUDE_CODE_SIMPLE=1 already
+    // reduces this, but we truncate as a safety net.
+    const MAX_SYSTEM_PROMPT: usize = 800;
     let messages: Vec<Message> = req
         .messages
         .iter()
-        .map(|m| match m.role.as_str() {
-            "system" => Message::system(&m.content),
-            "assistant" => Message::assistant(&m.content),
-            _ => Message::user(&m.content),
+        .map(|m| {
+            let content = if m.role == "system" && m.content.len() > MAX_SYSTEM_PROMPT {
+                tracing::warn!(
+                    original_len = m.content.len(),
+                    truncated_len = MAX_SYSTEM_PROMPT,
+                    "System prompt truncated for local model performance"
+                );
+                format!("{}\n\n[Be concise. Use tools when needed.]", &m.content[..MAX_SYSTEM_PROMPT])
+            } else {
+                m.content.clone()
+            };
+            match m.role.as_str() {
+                "system" => Message::system(&content),
+                "assistant" => Message::assistant(&content),
+                _ => Message::user(&content),
+            }
         })
         .collect();
 

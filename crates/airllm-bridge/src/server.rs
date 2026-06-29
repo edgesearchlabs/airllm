@@ -2,9 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use airllm_orchestrator::{
-    execute_tool, parse_prompt, parse_tool_calls, CodeRequest, Orchestrator,
-};
+use airllm_orchestrator::Orchestrator;
 use airllm_ollama::{ChatOptions, Message, OllamaClient};
 use axum::{
     extract::State,
@@ -25,8 +23,11 @@ use crate::types::{
 /// State shared across all request handlers.
 #[derive(Clone)]
 pub struct BridgeState {
-    pub orchestrator: Arc<Orchestrator>,
     pub ollama: OllamaClient,
+    // Orchestrator kept for potential future use (CLI path), but NOT used
+    // in the bridge proxy path — the frontend manages its own tools.
+    #[allow(dead_code)]
+    pub orchestrator: Arc<Orchestrator>,
 }
 
 /// The bridge server — an OpenAI-compatible HTTP API backed by our Rust orchestrator.
@@ -39,8 +40,8 @@ impl BridgeServer {
     pub fn new(orchestrator: Orchestrator, ollama: OllamaClient, addr: SocketAddr) -> Self {
         Self {
             state: BridgeState {
-                orchestrator: Arc::new(orchestrator),
                 ollama,
+                orchestrator: Arc::new(orchestrator),
             },
             addr,
         }
@@ -71,8 +72,13 @@ impl BridgeServer {
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 /// POST /v1/chat/completions — OpenAI-compatible chat completions.
-/// Supports tool calls: if the LLM response contains tool calls, they are
-/// executed by our Rust orchestrator and results are included.
+///
+/// This is a **transparent proxy** to Ollama. The frontend (OpenAirLLM/Ink)
+/// manages its own tool calling, system prompts, and permission dialogs.
+/// The bridge just forwards messages straight to Ollama and formats the
+/// response in OpenAI format. This avoids double-processing (frontend
+/// system prompt + orchestrator system prompt) which was causing extreme
+/// latency with local models.
 async fn chat_completions(
     State(state): State<BridgeState>,
     Json(req): Json<ChatCompletionRequest>,
@@ -84,75 +90,34 @@ async fn chat_completions(
         "bridge: /v1/chat/completions"
     );
 
-    // Convert OpenAI messages to our orchestrator CodeRequest
-    let user_prompt = req
+    // Convert OpenAI messages to Ollama messages — pass through as-is.
+    // The frontend's system prompt and tool definitions are preserved.
+    let messages: Vec<Message> = req
         .messages
         .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
+        .map(|m| match m.role.as_str() {
+            "system" => Message::system(&m.content),
+            "assistant" => Message::assistant(&m.content),
+            _ => Message::user(&m.content),
+        })
+        .collect();
 
-    // Parse the prompt for file path / language hints
-    let intent = parse_prompt(&user_prompt);
-
-    // Build the request with tool calling enabled
-    let code_req = CodeRequest {
-        task: user_prompt.clone(),
-        language: intent.language,
-        files: vec![],
-        model_override: Some(req.model.clone()),
-        permission_mode: "bypass".to_string(),
-        max_rounds: 5,
+    // Forward directly to Ollama — no orchestrator, no double system prompt.
+    let chat_options = ChatOptions {
+        temperature: req.temperature.unwrap_or(0.7),
+        ..ChatOptions::default()
     };
 
-    // Use the orchestrator's code path (includes tool calling loop)
-    let response = state
-        .orchestrator
-        .code(code_req)
+    let content = state
+        .ollama
+        .chat(&req.model, &messages, chat_options)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Check if the response contains tool calls that need to be reported
-    let tool_calls = parse_tool_calls(&response.output);
-    let has_tool_calls = !tool_calls.is_empty();
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-
-    // If there are tool calls, format the response as OpenAI tool_calls format
-    let message = if has_tool_calls {
-        // Execute the tool calls and build the response
-        let mut tool_results = Vec::new();
-        for call in &tool_calls {
-            let result = execute_tool(call);
-            tool_results.push(serde_json::json!({
-                "id": format!("call_{}", now),
-                "type": "function",
-                "function": {
-                    "name": call.name,
-                    "arguments": call.arguments.to_string(),
-                },
-                "result": {
-                    "success": result.success,
-                    "output": result.output,
-                    "files": result.files_affected,
-                }
-            }));
-        }
-
-        ChatMessage {
-            role: "assistant".to_string(),
-            content: response.output,
-        }
-    } else {
-        ChatMessage {
-            role: "assistant".to_string(),
-            content: response.output,
-        }
-    };
 
     Ok(Json(ChatCompletionResponse {
         id: format!("chatcmpl-{}", now),
@@ -161,8 +126,11 @@ async fn chat_completions(
         model: req.model,
         choices: vec![ChatChoice {
             index: 0,
-            message,
-            finish_reason: if has_tool_calls { "tool_calls" } else { "stop" }.to_string(),
+            message: ChatMessage {
+                role: "assistant".to_string(),
+                content,
+            },
+            finish_reason: "stop".to_string(),
         }],
         usage: Usage {
             prompt_tokens: 0,

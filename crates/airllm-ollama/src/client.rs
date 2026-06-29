@@ -136,6 +136,118 @@ impl OllamaClient {
         Ok(chat_resp.message.content)
     }
 
+    /// Send a streaming chat request. Returns an async stream of token chunks
+    /// as they arrive from Ollama (NDJSON stream: one JSON object per line).
+    pub async fn chat_stream(
+        &self,
+        model: &str,
+        messages: &[Message],
+        options: ChatOptions,
+    ) -> Result<impl futures::Stream<Item = Result<String>>> {
+        let req = ChatRequest {
+            model,
+            messages,
+            stream: true,
+            keep_alive: Some(&self.default_keep_alive),
+            options: Some(options),
+        };
+
+        let url = format!("{}/api/chat", self.base_url);
+        debug!("POST {} (model={}, stream=true)", url, model);
+
+        let resp = self.http.post(&url).json(&req).send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            if status == 404 {
+                return Err(OllamaError::ModelNotFound(model.to_string()));
+            }
+            return Err(OllamaError::Http { status, body });
+        }
+
+        // Ollama streams NDJSON: {"message":{"content":"tok"},"done":false}\n
+        // We convert this into a stream of content strings.
+        let byte_stream = resp.bytes_stream();
+
+        // Use a buffer to accumulate partial NDJSON lines
+        let stream = futures::stream::unfold(
+            (byte_stream, String::new()),
+            |(mut byte_stream, mut buffer)| async move {
+                use futures::StreamExt;
+
+                loop {
+                    // Try to parse a complete line from the buffer
+                    if let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].to_string();
+                        buffer = buffer[newline_pos + 1..].to_string();
+
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        // Parse the NDJSON line
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let content = v
+                                .get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let done = v.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
+
+                            if !content.is_empty() {
+                                return Some((Ok(content), (byte_stream, buffer)));
+                            }
+                            if done {
+                                return None;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Need more data from the byte stream
+                    match byte_stream.next().await {
+                        Some(Ok(chunk)) => {
+                            buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        }
+                        Some(Err(e)) => {
+                            return Some((
+                                Err(OllamaError::Http {
+                                    status: 500,
+                                    body: e.to_string(),
+                                }),
+                                (byte_stream, buffer),
+                            ));
+                        }
+                        None => {
+                            // Stream ended — try to parse any remaining buffer
+                            if buffer.trim().is_empty() {
+                                return None;
+                            }
+                            // Treat remaining buffer as a final line
+                            let line = std::mem::take(&mut buffer);
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                                let content = v
+                                    .get("message")
+                                    .and_then(|m| m.get("content"))
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !content.is_empty() {
+                                    return Some((Ok(content), (byte_stream, buffer)));
+                                }
+                            }
+                            return None;
+                        }
+                    }
+                }
+            },
+        );
+
+        Ok(stream)
+    }
+
     /// Send a non-streaming chat request and return both the response text
     /// and detailed metrics (latency, tokens, tokens/s).
     pub async fn chat_with_metrics(

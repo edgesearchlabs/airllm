@@ -12,7 +12,7 @@ use axum::{
     routing::post,
     Router,
 };
-use futures::stream;
+use futures::stream::{self, StreamExt};
 use serde_json::json;
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -122,7 +122,8 @@ async fn chat_completions(
     };
 
     if req.stream {
-        // Streaming SSE response — OpenAI format
+        // Streaming SSE response — real token-by-token streaming from Ollama.
+        // The Ollama API sends NDJSON chunks; we convert each to an OpenAI SSE event.
         let model = req.model.clone();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -130,58 +131,68 @@ async fn chat_completions(
             .as_secs();
         let chat_id = format!("chatcmpl-{}", now);
 
-        // Get the full response from Ollama, then stream it as SSE chunks.
-        // This is simpler than proxying Ollama's stream and works reliably.
-        let content = state
+        let ollama_stream = state
             .ollama
-            .chat(&req.model, &messages, chat_options)
+            .chat_stream(&req.model, &messages, chat_options)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        // Build SSE stream: send content in chunks, then a final done event
-        let chunk_size = 4; // chars per SSE chunk
-        let chars: Vec<char> = content.chars().collect();
-        let chunks: Vec<String> = chars
-            .chunks(chunk_size)
-            .map(|c| c.iter().collect())
-            .collect();
-
-        let sse_events: Vec<String> = chunks
-            .iter()
-            .map(|chunk| {
-                let data = json!({
-                    "id": &chat_id,
-                    "object": "chat.completion.chunk",
-                    "created": now,
-                    "model": &model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": chunk},
-                        "finish_reason": null
-                    }]
-                });
-                format!("data: {}\n\n", data)
-            })
-            .collect();
-
-        // Final done event
-        let final_data = json!({
-            "id": &chat_id,
-            "object": "chat.completion.chunk",
-            "created": now,
-            "model": &model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop"
-            }]
+        // Transform each Ollama token into an OpenAI SSE chunk
+        let sse_model = model.clone();
+        let sse_chat_id = chat_id.clone();
+        let sse_stream = ollama_stream.map(move |result| {
+            match result {
+                Ok(token) => {
+                    let data = json!({
+                        "id": &sse_chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": now,
+                        "model": &sse_model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": token},
+                            "finish_reason": null
+                        }]
+                    });
+                    Ok(format!("data: {}\n\n", data))
+                }
+                Err(e) => {
+                    let data = json!({
+                        "id": &sse_chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": now,
+                        "model": &sse_model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop"
+                        }],
+                        "error": e.to_string()
+                    });
+                    Ok(format!("data: {}\n\ndata: [DONE]\n\n", data))
+                }
+            }
         });
-        let mut all_events = sse_events;
-        all_events.push(format!("data: {}\n\n", final_data));
-        all_events.push("data: [DONE]\n\n".to_string());
 
-        let stream = stream::iter(all_events.into_iter().map(Ok::<_, std::convert::Infallible>));
-        let body = Body::from_stream(stream);
+        // Append the final done event
+        let final_model = model.clone();
+        let final_chat_id = chat_id.clone();
+        let final_stream = sse_stream.chain(stream::once(async move {
+            let final_data = json!({
+                "id": &final_chat_id,
+                "object": "chat.completion.chunk",
+                "created": now,
+                "model": &final_model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
+            });
+            Ok::<String, std::convert::Infallible>(format!("data: {}\n\ndata: [DONE]\n\n", final_data))
+        }));
+
+        let body = Body::from_stream(final_stream);
 
         Ok(Response::builder()
             .status(StatusCode::OK)

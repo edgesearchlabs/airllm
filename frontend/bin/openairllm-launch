@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# OpenAirLLM By EdgeSearch — launcher script
+# Starts the Rust bridge server and the OpenAirLLM frontend (OpenClaude fork)
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+AIRLLM_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
+
+# Config
+BRIDGE_ADDR="${AIRLLM_BRIDGE_ADDR:-127.0.0.1:18080}"
+OLLAMA_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
+DEFAULT_MODEL="${OPENAI_MODEL:-qwen2.5-coder:14b}"
+
+# Colors
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+echo -e "${CYAN}OpenAirLLM By EdgeSearch${NC}"
+echo -e "${GREEN}Starting bridge server at ${BRIDGE_ADDR}...${NC}"
+
+# Start the Rust bridge in background
+export OLLAMA_BASE_URL="$OLLAMA_URL"
+export AIRLLM_BRIDGE_ADDR="$BRIDGE_ADDR"
+"$AIRLLM_ROOT/target/debug/bridge" &
+BRIDGE_PID=$!
+
+# Wait for bridge to be ready
+sleep 2
+
+# Check if bridge is running
+if ! kill -0 $BRIDGE_PID 2>/dev/null; then
+    echo "Error: Bridge server failed to start"
+    exit 1
+fi
+
+echo -e "${GREEN}Bridge is ready. Starting frontend...${NC}"
+
+# Configure the frontend to use our bridge as the OpenAI-compatible endpoint
+export CLAUDE_CODE_USE_OPENAI=1
+export OPENAI_BASE_URL="http://${BRIDGE_ADDR}/v1"
+export OPENAI_MODEL="$DEFAULT_MODEL"
+
+# Start the frontend
+node "$SCRIPT_DIR/openairllm" "$@"
+
+# Cleanup: kill bridge when frontend exits
+kill $BRIDGE_PID 2>/dev/null || true

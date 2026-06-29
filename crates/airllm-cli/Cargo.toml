@@ -20,9 +20,7 @@ airllm-training = { workspace = true }
 airllm-tools = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
-crossterm = { workspace = true }
 futures = { workspace = true }
-ratatui = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

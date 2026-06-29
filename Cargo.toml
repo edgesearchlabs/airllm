@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/airllm-ollama",
     "crates/airllm-orchestrator",
+    "crates/airllm-bridge",
     "crates/airllm-cli",
     "crates/airllm-mcp",
     "crates/airllm-python",
@@ -64,6 +65,7 @@ memmap2 = "0.9"
 # Internal crates
 airllm-ollama = { path = "crates/airllm-ollama" }
 airllm-orchestrator = { path = "crates/airllm-orchestrator" }
+airllm-bridge = { path = "crates/airllm-bridge" }
 airllm-state = { path = "crates/airllm-state" }
 airllm-permissions = { path = "crates/airllm-permissions" }
 airllm-tools = { path = "crates/airllm-tools" }

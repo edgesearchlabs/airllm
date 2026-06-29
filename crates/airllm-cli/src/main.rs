@@ -1,7 +1,5 @@
 mod commands;
 mod config;
-mod dashboard;
-mod tui;
 
 use std::path::PathBuf;
 
@@ -39,8 +37,6 @@ enum Commands {
     Chat(chat::ChatCmd),
     Models,
     Routes,
-    /// Launch interactive TUI dashboard
-    Tui,
     /// Start the autonomous daemon
     Daemon {
         /// SQLite database path
@@ -173,9 +169,6 @@ async fn main() -> Result<()> {
         Commands::Chat(cmd) => chat::run(cmd, &orchestrator).await?,
         Commands::Models => models::run(&orchestrator).await?,
         Commands::Routes => routes::run(&orchestrator).await?,
-        Commands::Tui => {
-            dashboard::run_dashboard(&ollama_url).await?;
-        }
         Commands::Daemon { db, permissions, schedule } => {
             let config = airllm_daemon::DaemonConfig {
                 ollama_url: ollama_url.clone(),

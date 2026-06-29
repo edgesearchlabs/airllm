@@ -76,6 +76,8 @@ async fn dispatch(tool: &str, args: Value, orchestrator: Arc<Orchestrator>) -> R
                 language,
                 files,
                 model_override,
+                permission_mode: "bypass".to_string(),
+                max_rounds: 5,
             };
             let resp = orchestrator.code(req).await.map_err(|e| McpError::Orchestrator(e.to_string()))?;
             Ok(json!({"output": resp.output, "files_written": resp.files_written, "agent_used": resp.agent_used, "model_used": resp.model_used}))

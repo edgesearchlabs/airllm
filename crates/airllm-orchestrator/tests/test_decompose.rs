@@ -37,6 +37,8 @@ async fn decompose_parses_json_array() {
         language: Some("rust".to_string()),
         files: vec!["src/lib.rs".to_string()],
         model_override: None,
+        permission_mode: "bypass".to_string(),
+        max_rounds: 5,
     };
 
     let subtasks = decompose_request(
@@ -67,6 +69,8 @@ async fn decompose_falls_back_when_response_is_not_json() {
         language: None,
         files: vec!["src/lib.rs".to_string()],
         model_override: None,
+        permission_mode: "bypass".to_string(),
+        max_rounds: 5,
     };
 
     let subtasks = decompose_request(

@@ -178,6 +178,8 @@ impl Daemon {
                     language: None,
                     files: Vec::new(),
                     model_override: None,
+                    permission_mode: "bypass".to_string(),
+                    max_rounds: 5,
                 };
                 match self.orchestrator.code(req).await {
                     Ok(resp) => (resp.output, "continue".into(), None),

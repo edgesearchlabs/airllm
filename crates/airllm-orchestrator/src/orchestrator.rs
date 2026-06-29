@@ -12,7 +12,11 @@ use crate::agent::Agent;
 use crate::consolidate::consolidate_results;
 use crate::decompose::decompose_request;
 use crate::error::{OrchestratorError, Result};
+use crate::permissions::{check_permission, PermissionAction, PermissionDecision, PermissionMode};
+use crate::prompt_parser::parse_prompt;
 use crate::registry::AgentRegistry;
+use crate::system_prompt;
+use crate::tools::{execute_tool, extract_visible_text, has_tool_calls, parse_tool_calls, ToolResult};
 use crate::types::{
     AgentResult, CodeRequest, CodeResponse, RefactorResponse, ReviewResponse,
     SubTask, TestResponse,
@@ -61,7 +65,9 @@ impl Orchestrator {
         self.code_full(request).await
     }
 
-    /// Fast code generation — single model call, no decomposition.
+    /// Fast code generation — single model call with tool calling loop.
+    /// The LLM is instructed to emit tool calls, which are parsed and executed.
+    /// Results are fed back into the conversation for up to `max_rounds` iterations.
     pub async fn code_fast(&self, request: CodeRequest) -> Result<CodeResponse> {
         if request.task.trim().is_empty() {
             return Err(OrchestratorError::InvalidRequest(
@@ -69,7 +75,6 @@ impl Orchestrator {
             ));
         }
 
-        // Skip decomposition — go direct to coder agent with selected model
         let agent = self
             .agents
             .get("coder")
@@ -81,20 +86,152 @@ impl Orchestrator {
             self.resolve_agent_model(agent, request.model_override.as_deref()).await
         };
 
-        let subtask = SubTask {
-            id: "fast-1".into(),
-            description: request.task.clone(),
-            agent_name: "coder".into(),
-            input_files: request.files.clone(),
-        };
+        // Parse the user prompt for file path / language hints
+        let intent = parse_prompt(&request.task);
 
-        let result = agent
-            .execute_with_model(&subtask, &self.ollama, Some(&model))
-            .await?;
+        // Build structured system prompt with tool instructions
+        let sys_prompt = system_prompt::for_agent("coder");
+
+        // Build the initial user message with context
+        let mut user_msg = request.task.clone();
+        if let Some(ref path) = intent.file_path {
+            user_msg = format!("{user_msg}\n\n(File path detected: {path})");
+        }
+        if let Some(ref dir) = intent.output_dir {
+            user_msg = format!("{user_msg}\n\n(Output directory: {dir})");
+        }
+        if let Some(ref lang) = intent.language {
+            user_msg = format!("{user_msg}\n\n(Language: {lang})");
+        }
+
+        // Permission mode
+        let perm_mode = PermissionMode::parse_mode(&request.permission_mode);
+        let max_rounds = request.max_rounds.clamp(1, 10);
+
+        // Tool calling loop
+        let mut messages = vec![
+            Message::system(sys_prompt),
+            Message::user(user_msg),
+        ];
+        let mut all_output = String::new();
+        let mut all_files: Vec<String> = Vec::new();
+
+        for round in 0..max_rounds {
+            let output = self
+                .ollama
+                .chat(
+                    &model,
+                    &messages,
+                    ChatOptions {
+                        temperature: agent.config.temperature,
+                        top_p: agent.config.top_p,
+                        ..ChatOptions::default()
+                    },
+                )
+                .await?;
+
+            // Check if the LLM emitted any tool calls
+            if !has_tool_calls(&output) {
+                // No tool calls — this is the final response
+                all_output.push_str(&output);
+                break;
+            }
+
+            // Extract visible text (non-tool-call portion)
+            let visible = extract_visible_text(&output);
+            if !visible.is_empty() {
+                all_output.push_str(&visible);
+                all_output.push('\n');
+            }
+
+            // Parse and execute tool calls
+            let tool_calls = parse_tool_calls(&output);
+            let mut tool_results = Vec::new();
+
+            for call in &tool_calls {
+                // Build permission action
+                let action = match call.name.as_str() {
+                    "file_write" | "write_file" | "FileWriteTool" => {
+                        let path = call.arguments.get("file_path")
+                            .or_else(|| call.arguments.get("path"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("").to_string();
+                        let content = call.arguments.get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("").to_string();
+                        PermissionAction::FileWrite { path, content }
+                    }
+                    "file_read" | "read_file" | "FileReadTool" => {
+                        let path = call.arguments.get("file_path")
+                            .or_else(|| call.arguments.get("path"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("").to_string();
+                        PermissionAction::FileRead { path }
+                    }
+                    "bash" | "run_command" | "BashTool" => {
+                        let command = call.arguments.get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("").to_string();
+                        PermissionAction::Bash { command }
+                    }
+                    "list_files" | "ListFilesTool" => {
+                        let path = call.arguments.get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(".").to_string();
+                        PermissionAction::ListFiles { path }
+                    }
+                    _ => {
+                        // Unknown tool — execute directly (will return error)
+                        let result = execute_tool(call);
+                        tool_results.push(result);
+                        continue;
+                    }
+                };
+
+                // Check permission
+                let decision = check_permission(&action, perm_mode);
+                match decision {
+                    PermissionDecision::Allow | PermissionDecision::AllowSession => {
+                        let result = execute_tool(call);
+                        if !result.files_affected.is_empty() {
+                            all_files.extend(result.files_affected.clone());
+                        }
+                        // Add a note about permission
+                        if !result.success {
+                            info!(tool = %call.name, "tool call failed");
+                        }
+                        tool_results.push(result);
+                    }
+                    PermissionDecision::Deny { reason } => {
+                        tool_results.push(ToolResult::err(&call.name, format!("Permission denied: {reason}")));
+                    }
+                }
+            }
+
+            // Build tool results message
+            let results_xml: String = tool_results
+                .iter()
+                .map(|r| r.to_block())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // Add assistant output and tool results to conversation
+            messages.push(Message::assistant(output));
+            messages.push(Message::user(format!("Tool results:\n{results_xml}\n\nContinue based on these results. If the task is complete, respond with a brief summary.")));
+
+            // On the last round, get final output without tool calls
+            if round == max_rounds - 1 {
+                all_output.push_str("\n(Max tool call rounds reached)");
+            }
+        }
+
+        // Deduplicate files
+        all_files.sort();
+        all_files.dedup();
 
         Ok(CodeResponse {
-            output: result.output,
-            files_written: result.files,
+            output: all_output,
+            files_written: all_files,
             agent_used: agent.name.clone(),
             model_used: model,
         })
@@ -225,7 +362,7 @@ impl Orchestrator {
         let resolved = self.resolve_model_candidates(&preferred, None).await;
         info!(task = %prompt, model = %resolved, complexity = %complexity, "chat request");
         let messages = vec![
-            Message::system("You are AirLLM, a multi-agent coding assistant powered by local Ollama models."),
+            Message::system(system_prompt::build_chat_prompt()),
             Message::user(prompt),
         ];
         self.ollama

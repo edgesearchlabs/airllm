@@ -6,6 +6,16 @@ pub struct CodeRequest {
     pub language: Option<String>,
     pub files: Vec<String>,
     pub model_override: Option<String>,
+    /// Permission mode for tool execution. Default: prompt for each action.
+    #[serde(default)]
+    pub permission_mode: String,
+    /// Maximum number of tool-call rounds before giving up.
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: u32,
+}
+
+fn default_max_rounds() -> u32 {
+    5
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -31,6 +31,8 @@ impl PyOrchestrator {
 			language: language.map(|s| s.to_string()),
 			files: Vec::new(),
 			model_override: None,
+			permission_mode: "bypass".to_string(),
+			max_rounds: 5,
 		};
 		let rt = tokio::runtime::Runtime::new()?;
 		let resp = rt.block_on(self.inner.code(req)).map_err(to_py_err)?;

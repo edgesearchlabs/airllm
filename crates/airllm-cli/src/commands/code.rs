@@ -20,6 +20,12 @@ pub struct CodeCmd {
     /// Render streaming output in the TUI
     #[arg(long)]
     pub stream: bool,
+    /// Permission mode: default (prompt), accept (auto-approve files), bypass (no prompts)
+    #[arg(long, default_value = "default")]
+    pub permissions: String,
+    /// Max tool call rounds
+    #[arg(long, default_value_t = 5)]
+    pub max_rounds: u32,
 }
 
 pub async fn run(cmd: CodeCmd, orchestrator: &Orchestrator) -> Result<()> {
@@ -28,6 +34,8 @@ pub async fn run(cmd: CodeCmd, orchestrator: &Orchestrator) -> Result<()> {
         language: cmd.language.clone(),
         files: vec![cmd.output.clone()],
         model_override: cmd.model.clone(),
+        permission_mode: cmd.permissions.clone(),
+        max_rounds: cmd.max_rounds,
     };
 
     if cmd.stream {
@@ -37,13 +45,9 @@ pub async fn run(cmd: CodeCmd, orchestrator: &Orchestrator) -> Result<()> {
         let resp = orchestrator.code(request).await?;
         println!("{}", resp.output);
 
-        // Auto-extract and save code blocks to files
-        if let Some(info) = crate::dashboard::extract_and_save_code_pub(&resp.output) {
+        if !resp.files_written.is_empty() {
             println!("\n---");
-            println!("✅ {}", info.action);
-            println!("   {}", info.detail);
-        } else if !resp.files_written.is_empty() {
-            println!("\nFiles: {}", resp.files_written.join(", "));
+            println!("📁 Files: {}", resp.files_written.join(", "));
         }
     }
 

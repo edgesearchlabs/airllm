@@ -208,6 +208,7 @@ async fn chat_completions(
                         .map(|arr| {
                             arr.iter().enumerate().map(|(i, tc)| {
                                 json!({
+                                    "index": i,
                                     "id": tc.get("id").and_then(|v| v.as_str()).unwrap_or(&format!("call_{}", i)),
                                     "type": "function",
                                     "function": {
@@ -227,7 +228,7 @@ async fn chat_completions(
                         "choices": [{
                             "index": 0,
                             "delta": {"tool_calls": openai_tool_calls},
-                            "finish_reason": null
+                            "finish_reason": "tool_calls"
                         }]
                     });
                     Ok(format!("data: {}\n\n", data))

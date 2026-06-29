@@ -149,23 +149,15 @@ async fn chat_completions(
         ..ChatOptions::default()
     };
 
-    // Convert OpenAI tools to Ollama format.
-    // OpenAI: {"type":"function","function":{"name":"...","parameters":{...}}}
-    // Ollama: {"type":"function","function":{"name":"...","parameters":{...}}}
-    // They're the same format! Just pass through.
-    let ollama_tools: Option<Vec<serde_json::Value>> = req.tools.map(|t| {
-        t.into_iter()
-            .map(|tool| {
-                // Ollama expects the same format as OpenAI
-                if tool.get("type").and_then(|v| v.as_str()) == Some("function") {
-                    tool
-                } else {
-                    // Wrap in function format if not already
-                    json!({"type": "function", "function": tool})
-                }
-            })
-            .collect()
-    });
+    // DO NOT pass tools to Ollama. The frontend (OpenAirLLM/Ink) has its own
+    // tool calling mechanism (XML-based). When we pass tools to Ollama's
+    // native function calling, the model returns tool_calls instead of text,
+    // and the frontend gets confused — it tries to execute the tool, sends
+    // another request, and enters an infinite loop with no visible response.
+    //
+    // By NOT passing tools, the model responds with text (including XML tool
+    // calls that the frontend can parse), and the conversation flows normally.
+    let ollama_tools: Option<Vec<serde_json::Value>> = None;
 
     if req.stream {
         // Streaming SSE response — real token-by-token streaming from Ollama.

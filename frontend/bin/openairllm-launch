@@ -24,7 +24,9 @@ echo -e "${GREEN}Starting bridge server at ${BRIDGE_ADDR}...${NC}"
 # Start the Rust bridge in background
 export OLLAMA_BASE_URL="$OLLAMA_URL"
 export AIRLLM_BRIDGE_ADDR="$BRIDGE_ADDR"
-"$AIRLLM_ROOT/target/debug/bridge" &
+# Keep model loaded for 24h to avoid reload latency (default is 5min)
+export OLLAMA_KEEP_ALIVE="24h"
+"$AIRLLM_ROOT/target/release/bridge" &
 BRIDGE_PID=$!
 
 # Wait for bridge to be ready

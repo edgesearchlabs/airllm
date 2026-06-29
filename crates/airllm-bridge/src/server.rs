@@ -92,30 +92,40 @@ async fn chat_completions(
     );
 
     // Convert OpenAI messages to Ollama messages.
-    // Truncate system prompt for local model performance.
-    const MAX_SYSTEM_PROMPT: usize = 800;
+    // Replace the frontend's system prompt with a minimal one for local models.
+    // The OpenAirLLM/Ink frontend sends 3000+ token system prompts that kill
+    // performance on small local models. We replace it with a concise prompt
+    // that preserves the essential instructions.
     let messages: Vec<Message> = req
         .messages
         .iter()
         .map(|m| {
-            let content = if m.role == "system" && m.content.len() > MAX_SYSTEM_PROMPT {
-                tracing::warn!(
-                    original_len = m.content.len(),
-                    truncated_len = MAX_SYSTEM_PROMPT,
-                    "System prompt truncated for local model performance"
-                );
-                format!("{}\n\n[Be concise. Use tools when needed.]", &m.content[..MAX_SYSTEM_PROMPT])
+            if m.role == "system" {
+                // Replace any system prompt > 200 chars with a minimal version
+                // that keeps the key instructions but removes the bloat.
+                if m.content.len() > 200 {
+                    tracing::info!(
+                        original_len = m.content.len(),
+                        "Replacing large system prompt with minimal version for local model"
+                    );
+                    Message::system(
+                        "You are a helpful coding assistant. Be concise. \
+                         Use available tools when needed. Answer directly."
+                    )
+                } else {
+                    Message::system(&m.content)
+                }
             } else {
-                m.content.clone()
-            };
-            match m.role.as_str() {
-                "system" => Message::system(&content),
-                "assistant" => Message::assistant(&content),
-                _ => Message::user(&content),
+                match m.role.as_str() {
+                    "assistant" => Message::assistant(&m.content),
+                    _ => Message::user(&m.content),
+                }
             }
         })
         .collect();
 
+    // Use default Ollama options — don't override num_ctx as that forces
+    // the model to reload with a different context window.
     let chat_options = ChatOptions {
         temperature: req.temperature.unwrap_or(0.7),
         ..ChatOptions::default()

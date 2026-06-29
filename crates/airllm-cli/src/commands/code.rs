@@ -36,7 +36,13 @@ pub async fn run(cmd: CodeCmd, orchestrator: &Orchestrator) -> Result<()> {
     } else {
         let resp = orchestrator.code(request).await?;
         println!("{}", resp.output);
-        if !resp.files_written.is_empty() {
+
+        // Auto-extract and save code blocks to files
+        if let Some(info) = crate::dashboard::extract_and_save_code_pub(&resp.output) {
+            println!("\n---");
+            println!("✅ {}", info.action);
+            println!("   {}", info.detail);
+        } else if !resp.files_written.is_empty() {
             println!("\nFiles: {}", resp.files_written.join(", "));
         }
     }

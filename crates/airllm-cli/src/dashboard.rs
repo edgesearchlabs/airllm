@@ -659,12 +659,34 @@ pub async fn run_dashboard(ollama_url: &str) -> Result<()> {
         if let Ok(res) = result_rx.try_recv() {
             d.output = res.response.clone();
             d.metrics = Some(res.metrics.clone());
-            d.status = format!(
-                "✓ {} | {} | {:.1} tok/s | {}ms | {} out | {} in",
-                res.mode_label, res.model,
-                res.metrics.tokens_per_second, res.metrics.latency_ms,
-                res.metrics.output_tokens, res.metrics.input_tokens
-            );
+
+            // Auto-execute: if Code mode and response contains code blocks, save to file
+            if res.mode == Mode::Code || res.mode == Mode::Autonomous {
+                if let Some(file_info) = extract_and_save_code(&res.response, &res.mode) {
+                    d.output = format!("{}\n\n---\n✅ Action executed: {}\n{}", res.response, file_info.action, file_info.detail);
+                    d.status = format!(
+                        "✓ {} | {} | {:.1} tok/s | {}ms | {} out | {} in | {}",
+                        res.mode_label, res.model,
+                        res.metrics.tokens_per_second, res.metrics.latency_ms,
+                        res.metrics.output_tokens, res.metrics.input_tokens, file_info.action
+                    );
+                } else {
+                    d.status = format!(
+                        "✓ {} | {} | {:.1} tok/s | {}ms | {} out | {} in",
+                        res.mode_label, res.model,
+                        res.metrics.tokens_per_second, res.metrics.latency_ms,
+                        res.metrics.output_tokens, res.metrics.input_tokens
+                    );
+                }
+            } else {
+                d.status = format!(
+                    "✓ {} | {} | {:.1} tok/s | {}ms | {} out | {} in",
+                    res.mode_label, res.model,
+                    res.metrics.tokens_per_second, res.metrics.latency_ms,
+                    res.metrics.output_tokens, res.metrics.input_tokens
+                );
+            }
+
             d.history.push(HistoryEntry {
                 mode: res.mode, agent: res.agent, model: res.model.clone(),
                 prompt: d.input.clone(), response: res.response, metrics: res.metrics,
@@ -999,6 +1021,117 @@ fn score_quality(response: &str, prompt: &str) -> f32 {
     let code_bonus = if has_code { 0.3 } else { 0.0 };
     let relevance = if response.to_lowercase().contains(prompt.split_whitespace().next().unwrap_or("").to_lowercase().as_str()) { 0.2 } else { 0.0 };
     (len_score * 0.5 + code_bonus + relevance + 0.5).min(1.0)
+}
+
+// ── Code extraction and execution ────────────────────────────────────────────
+
+pub struct CodeActionInfo {
+    pub action: String,
+    pub detail: String,
+}
+
+/// Extract code blocks from LLM response and save to files.
+/// Returns Some(info) if code was extracted and saved, None otherwise.
+pub fn extract_and_save_code_pub(response: &str) -> Option<CodeActionInfo> {
+    extract_and_save_code(response, &Mode::Code)
+}
+
+fn extract_and_save_code(response: &str, _mode: &Mode) -> Option<CodeActionInfo> {
+    // Find all code blocks: ```lang\n...code...\n```
+    let mut code_blocks: Vec<(String, String)> = Vec::new(); // (language, code)
+
+    let mut in_code_block = false;
+    let mut current_lang = String::new();
+    let mut current_code = String::new();
+
+    for line in response.lines() {
+        if line.starts_with("```") {
+            if in_code_block {
+                // End of code block
+                code_blocks.push((current_lang.clone(), current_code.clone()));
+                in_code_block = false;
+                current_lang.clear();
+                current_code.clear();
+            } else {
+                // Start of code block
+                in_code_block = true;
+                current_lang = line.trim_start_matches("```").trim().to_string();
+            }
+        } else if in_code_block {
+            current_code.push_str(line);
+            current_code.push('\n');
+        }
+    }
+
+    if code_blocks.is_empty() {
+        return None;
+    }
+
+    // Determine file extension from language
+    let ext_for = |lang: &str| -> &str {
+        match lang.to_lowercase().as_str() {
+            "rust" | "rs" => "rs",
+            "python" | "py" => "py",
+            "javascript" | "js" | "node" => "js",
+            "typescript" | "ts" => "ts",
+            "java" => "java",
+            "go" => "go",
+            "c" | "cpp" | "c++" => "c",
+            "shell" | "bash" | "sh" => "sh",
+            "html" => "html",
+            "css" => "css",
+            "json" => "json",
+            "toml" => "toml",
+            "yaml" | "yml" => "yaml",
+            "sql" => "sql",
+            _ => "txt",
+        }
+    };
+
+    // Determine filename from code content (look for fn main, def main, class, etc.)
+    let filename_for = |code: &str, _lang: &str| -> String {
+        if code.contains("fn main(") || code.contains("def main(") || code.contains("if __name__") {
+            "main".to_string()
+        } else if code.contains("pub fn ") || code.contains("pub struct ") {
+            "lib".to_string()
+        } else {
+            "output".to_string()
+        }
+    };
+
+    // Save each code block to a file
+    let mut saved_files = Vec::new();
+    let output_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    for (i, (lang, code)) in code_blocks.iter().enumerate() {
+        let ext = ext_for(lang);
+        let base_name = filename_for(code, lang);
+        let filename = if code_blocks.len() == 1 {
+            format!("{base_name}.{ext}")
+        } else {
+            format!("{base_name}_{i}.{ext}")
+        };
+
+        let filepath = output_dir.join(&filename);
+        match std::fs::write(&filepath, code) {
+            Ok(_) => {
+                saved_files.push(filename.clone());
+                tracing::info!("Saved code block to {}", filepath.display());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to save code to {}: {e}", filepath.display());
+            }
+        }
+    }
+
+    if saved_files.is_empty() {
+        return None;
+    }
+
+    let action = format!("📁 Saved {} file(s)", saved_files.len());
+    let detail = format!("Files: {}", saved_files.join(", "));
+
+    Some(CodeActionInfo { action, detail })
 }
 
 // ── Draw ────────────────────────────────────────────────────────────────────

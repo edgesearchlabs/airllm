@@ -188,6 +188,24 @@ async fn chat_completions(
         let sse_chat_id = chat_id.clone();
         let had_tool_calls = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let had_tool_calls_clone = had_tool_calls.clone();
+
+        // First chunk: send role:assistant to initialize the message
+        // (OpenAI SSE format requires this before content chunks)
+        let init_chunk = format!(
+            "data: {}\n\n",
+            json!({
+                "id": &chat_id,
+                "object": "chat.completion.chunk",
+                "created": now,
+                "model": &model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": ""},
+                    "finish_reason": null
+                }]
+            })
+        );
+
         let sse_stream = ollama_stream.map(move |result| {
             match result {
                 Ok(StreamEvent::Content(token)) => {
@@ -256,11 +274,17 @@ async fn chat_completions(
             }
         });
 
+        // Prepend the init chunk (role:assistant) before the content stream
+        let init_stream = stream::once(async move {
+            Ok::<String, std::convert::Infallible>(init_chunk)
+        });
+        let combined_stream = init_stream.chain(sse_stream);
+
         // Append the final done event
         let final_model = model.clone();
         let final_chat_id = chat_id.clone();
         let final_had_tc = had_tool_calls.clone();
-        let final_stream = sse_stream.chain(stream::once(async move {
+        let final_stream = combined_stream.chain(stream::once(async move {
             let finish_reason = if final_had_tc.load(std::sync::atomic::Ordering::Relaxed) { "tool_calls" } else { "stop" };
             let final_data = json!({
                 "id": &final_chat_id,

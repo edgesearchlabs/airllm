@@ -53,11 +53,11 @@ export OPENAI_MODEL="$DEFAULT_MODEL"
 
 # Use simple system prompt for local models (avoids 3000+ token system prompt
 # that kills performance on small models like qwen3.5:4b)
-export CLAUDE_CODE_SIMPLE=1
+# NOTE: CLAUDE_CODE_SIMPLE=1 is disabled because it removes tool instructions.
+# The bridge truncates large system prompts instead, keeping tool instructions.
+# export CLAUDE_CODE_SIMPLE=1
 
-# Force all requests (including background/title/summary) to use the same
-# fast model. Without this, the frontend makes parallel calls with the
-# heavy default model (qwen2.5-coder:14b = 90s per call).
+# Force all requests to use the same model for consistent performance.
 export AIRLLM_FORCE_MODEL="$DEFAULT_MODEL"
 
 # Start the frontend with bypass permissions so it can create files

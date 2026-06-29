@@ -145,14 +145,16 @@ async fn chat_completions(
         ..ChatOptions::default()
     };
 
-    // DO NOT pass tools to Ollama. The frontend (OpenAirLLM/Ink) has its own
-    // tool calling mechanism (XML-based). When we pass tools to Ollama's
-    // native function calling, the model returns tool_calls instead of text,
-    // and the frontend gets confused — it tries to execute the tool, sends
-    // another request, and enters an infinite loop with no visible response.
+    // DO NOT pass tools to Ollama. The frontend (OpenAirLLM/Ink) uses an
+    // XML-based tool calling mechanism that expects the model to emit tool
+    // calls as text. When we pass tools to Ollama's native function calling,
+    // the model returns structured tool_calls in delta.tool_calls which the
+    // frontend's OpenAI shim cannot process properly — it expects Anthropic
+    // format, not OpenAI delta.tool_calls.
     //
-    // By NOT passing tools, the model responds with text (including XML tool
-    // calls that the frontend can parse), and the conversation flows normally.
+    // The frontend's system prompt already contains XML tool instructions
+    // that tell the model how to emit tool calls as text. The bridge just
+    // needs to pass the messages through and let the model generate text.
     let ollama_tools: Option<Vec<serde_json::Value>> = None;
 
     if req.stream {

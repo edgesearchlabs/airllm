@@ -36,7 +36,13 @@ if ! kill -0 $BRIDGE_PID 2>/dev/null; then
     exit 1
 fi
 
-echo -e "${GREEN}Bridge is ready. Starting frontend...${NC}"
+echo -e "${GREEN}Bridge is ready. Pre-warming model...${NC}"
+
+# Pre-warm the model so the first user request is fast
+curl -s http://localhost:11434/api/chat -d "{\"model\":\"$DEFAULT_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}" > /dev/null 2>&1 &
+PREWARM_PID=$!
+
+echo -e "${GREEN}Starting frontend...${NC}"
 
 # Configure the frontend to use our bridge as the OpenAI-compatible endpoint
 export CLAUDE_CODE_USE_OPENAI=1

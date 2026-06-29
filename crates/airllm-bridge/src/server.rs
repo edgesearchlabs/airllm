@@ -141,8 +141,9 @@ async fn chat_completions(
         })
         .collect();
 
-    // Use default Ollama options — don't override num_ctx as that forces
-    // the model to reload with a different context window.
+    // Use num_ctx that matches Ollama's default (4096) to avoid model reload.
+    // Changing num_ctx forces Ollama to reload the model with a different
+    // context window, which adds 5-10s latency on every request.
     let chat_options = ChatOptions {
         temperature: req.temperature.unwrap_or(0.7),
         ..ChatOptions::default()

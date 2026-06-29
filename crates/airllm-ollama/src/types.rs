@@ -26,6 +26,9 @@ impl fmt::Display for MessageRole {
 pub struct Message {
     pub role: MessageRole,
     pub content: String,
+    /// Tool calls made by the assistant (for function calling).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
 }
 
 impl Message {
@@ -33,6 +36,7 @@ impl Message {
         Self {
             role: MessageRole::System,
             content: content.into(),
+            tool_calls: None,
         }
     }
 
@@ -40,6 +44,7 @@ impl Message {
         Self {
             role: MessageRole::User,
             content: content.into(),
+            tool_calls: None,
         }
     }
 
@@ -47,6 +52,7 @@ impl Message {
         Self {
             role: MessageRole::Assistant,
             content: content.into(),
+            tool_calls: None,
         }
     }
 }

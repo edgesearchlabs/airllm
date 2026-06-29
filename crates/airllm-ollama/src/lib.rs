@@ -31,7 +31,7 @@ mod router;
 mod stream;
 mod types;
 
-pub use client::OllamaClient;
+pub use client::{OllamaClient, StreamEvent};
 pub use error::{OllamaError, Result};
 pub use router::ModelRouter;
 pub use stream::chat_stream;

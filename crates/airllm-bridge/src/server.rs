@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use airllm_orchestrator::Orchestrator;
-use airllm_ollama::{ChatOptions, Message, OllamaClient};
+use airllm_ollama::{ChatOptions, Message, OllamaClient, StreamEvent};
 use axum::{
     body::Body,
     extract::State,
@@ -148,9 +148,26 @@ async fn chat_completions(
         ..ChatOptions::default()
     };
 
+    // Convert OpenAI tools to Ollama format.
+    // OpenAI: {"type":"function","function":{"name":"...","parameters":{...}}}
+    // Ollama: {"type":"function","function":{"name":"...","parameters":{...}}}
+    // They're the same format! Just pass through.
+    let ollama_tools: Option<Vec<serde_json::Value>> = req.tools.map(|t| {
+        t.into_iter()
+            .map(|tool| {
+                // Ollama expects the same format as OpenAI
+                if tool.get("type").and_then(|v| v.as_str()) == Some("function") {
+                    tool
+                } else {
+                    // Wrap in function format if not already
+                    json!({"type": "function", "function": tool})
+                }
+            })
+            .collect()
+    });
+
     if req.stream {
         // Streaming SSE response — real token-by-token streaming from Ollama.
-        // The Ollama API sends NDJSON chunks; we convert each to an OpenAI SSE event.
         let model = effective_model.clone();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -158,18 +175,19 @@ async fn chat_completions(
             .as_secs();
         let chat_id = format!("chatcmpl-{}", now);
 
+        let tools_ref = ollama_tools.as_deref();
         let ollama_stream = state
             .ollama
-            .chat_stream(&effective_model, &messages, chat_options)
+            .chat_stream_with_tools(&effective_model, &messages, chat_options, tools_ref)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        // Transform each Ollama token into an OpenAI SSE chunk
+        // Transform each Ollama event into an OpenAI SSE chunk
         let sse_model = model.clone();
         let sse_chat_id = chat_id.clone();
         let sse_stream = ollama_stream.map(move |result| {
             match result {
-                Ok(token) => {
+                Ok(StreamEvent::Content(token)) => {
                     let data = json!({
                         "id": &sse_chat_id,
                         "object": "chat.completion.chunk",
@@ -178,6 +196,37 @@ async fn chat_completions(
                         "choices": [{
                             "index": 0,
                             "delta": {"content": token},
+                            "finish_reason": null
+                        }]
+                    });
+                    Ok(format!("data: {}\n\n", data))
+                }
+                Ok(StreamEvent::ToolCalls(tool_calls)) => {
+                    // Convert Ollama tool_calls to OpenAI format
+                    let openai_tool_calls: Vec<serde_json::Value> = tool_calls
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter().enumerate().map(|(i, tc)| {
+                                json!({
+                                    "id": tc.get("id").and_then(|v| v.as_str()).unwrap_or(&format!("call_{}", i)),
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or(""),
+                                        "arguments": tc.get("function").and_then(|f| f.get("arguments")).map(|a| a.to_string()).unwrap_or_else(|| "{}".to_string())
+                                    }
+                                })
+                            }).collect()
+                        })
+                        .unwrap_or_default();
+
+                    let data = json!({
+                        "id": &sse_chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": now,
+                        "model": &sse_model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"tool_calls": openai_tool_calls},
                             "finish_reason": null
                         }]
                     });
@@ -230,9 +279,10 @@ async fn chat_completions(
             .unwrap())
     } else {
         // Non-streaming JSON response
+        let tools_ref = ollama_tools.as_deref();
         let content = state
             .ollama
-            .chat(&effective_model, &messages, chat_options)
+            .chat_with_tools(&effective_model, &messages, chat_options, tools_ref)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

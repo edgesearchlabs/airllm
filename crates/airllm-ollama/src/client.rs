@@ -9,6 +9,15 @@ use tracing::debug;
 use crate::error::{OllamaError, Result};
 use crate::types::{ChatMetrics, ChatOptions, Message, ModelInfo};
 
+/// Events emitted by the streaming chat API.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// A text content chunk.
+    Content(String),
+    /// Tool calls returned by the model (Ollama native function calling).
+    ToolCalls(serde_json::Value),
+}
+
 /// Async client for the Ollama HTTP API.
 #[derive(Clone)]
 pub struct OllamaClient {
@@ -37,6 +46,9 @@ struct ChatRequest<'a> {
     keep_alive: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<ChatOptions>,
+    /// Tool definitions in Ollama format (same as OpenAI function format).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [serde_json::Value]>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +72,9 @@ struct ChatMessage {
     #[allow(dead_code)]
     role: Option<String>,
     content: String,
+    /// Tool calls returned by the model (Ollama native function calling).
+    #[serde(default)]
+    tool_calls: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -110,12 +125,24 @@ impl OllamaClient {
         messages: &[Message],
         options: ChatOptions,
     ) -> Result<String> {
+        self.chat_with_tools(model, messages, options, None).await
+    }
+
+    /// Send a non-streaming chat request with optional tool definitions.
+    pub async fn chat_with_tools(
+        &self,
+        model: &str,
+        messages: &[Message],
+        options: ChatOptions,
+        tools: Option<&[serde_json::Value]>,
+    ) -> Result<String> {
         let req = ChatRequest {
             model,
             messages,
             stream: false,
             keep_alive: Some(&self.default_keep_alive),
             options: Some(options),
+            tools,
         };
 
         let url = format!("{}/api/chat", self.base_url);
@@ -136,20 +163,32 @@ impl OllamaClient {
         Ok(chat_resp.message.content)
     }
 
-    /// Send a streaming chat request. Returns an async stream of token chunks
-    /// as they arrive from Ollama (NDJSON stream: one JSON object per line).
+    /// Send a streaming chat request. Returns an async stream of events
+    /// (content chunks and tool calls) as they arrive from Ollama.
     pub async fn chat_stream(
         &self,
         model: &str,
         messages: &[Message],
         options: ChatOptions,
-    ) -> Result<impl futures::Stream<Item = Result<String>>> {
+    ) -> Result<impl futures::Stream<Item = Result<StreamEvent>>> {
+        self.chat_stream_with_tools(model, messages, options, None).await
+    }
+
+    /// Send a streaming chat request with optional tool definitions.
+    pub async fn chat_stream_with_tools(
+        &self,
+        model: &str,
+        messages: &[Message],
+        options: ChatOptions,
+        tools: Option<&[serde_json::Value]>,
+    ) -> Result<impl futures::Stream<Item = Result<StreamEvent>>> {
         let req = ChatRequest {
             model,
             messages,
             stream: true,
             keep_alive: Some(&self.default_keep_alive),
             options: Some(options),
+            tools,
         };
 
         let url = format!("{}/api/chat", self.base_url);
@@ -188,16 +227,26 @@ impl OllamaClient {
 
                         // Parse the NDJSON line
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let content = v
-                                .get("message")
+                            let msg = v.get("message");
+                            let content = msg
                                 .and_then(|m| m.get("content"))
                                 .and_then(|c| c.as_str())
                                 .unwrap_or("")
                                 .to_string();
+                            let tool_calls = msg
+                                .and_then(|m| m.get("tool_calls"))
+                                .cloned();
                             let done = v.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
 
                             if !content.is_empty() {
-                                return Some((Ok(content), (byte_stream, buffer)));
+                                return Some((Ok(StreamEvent::Content(content)), (byte_stream, buffer)));
+                            }
+                            if let Some(tc) = tool_calls {
+                                if let Some(arr) = tc.as_array() {
+                                    if !arr.is_empty() {
+                                        return Some((Ok(StreamEvent::ToolCalls(tc)), (byte_stream, buffer)));
+                                    }
+                                }
                             }
                             if done {
                                 return None;
@@ -228,14 +277,24 @@ impl OllamaClient {
                             // Treat remaining buffer as a final line
                             let line = std::mem::take(&mut buffer);
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                                let content = v
-                                    .get("message")
+                                let msg = v.get("message");
+                                let content = msg
                                     .and_then(|m| m.get("content"))
                                     .and_then(|c| c.as_str())
                                     .unwrap_or("")
                                     .to_string();
+                                let tool_calls = msg
+                                    .and_then(|m| m.get("tool_calls"))
+                                    .cloned();
                                 if !content.is_empty() {
-                                    return Some((Ok(content), (byte_stream, buffer)));
+                                    return Some((Ok(StreamEvent::Content(content)), (byte_stream, buffer)));
+                                }
+                                if let Some(tc) = tool_calls {
+                                    if let Some(arr) = tc.as_array() {
+                                        if !arr.is_empty() {
+                                            return Some((Ok(StreamEvent::ToolCalls(tc)), (byte_stream, buffer)));
+                                        }
+                                    }
                                 }
                             }
                             return None;
@@ -264,6 +323,7 @@ impl OllamaClient {
             stream: false,
             keep_alive: Some(&self.default_keep_alive),
             options: Some(options.clone()),
+            tools: None,
         };
 
         let url = format!("{}/api/chat", self.base_url);

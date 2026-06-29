@@ -185,6 +185,8 @@ async fn chat_completions(
         // Transform each Ollama event into an OpenAI SSE chunk
         let sse_model = model.clone();
         let sse_chat_id = chat_id.clone();
+        let had_tool_calls = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let had_tool_calls_clone = had_tool_calls.clone();
         let sse_stream = ollama_stream.map(move |result| {
             match result {
                 Ok(StreamEvent::Content(token)) => {
@@ -202,6 +204,7 @@ async fn chat_completions(
                     Ok(format!("data: {}\n\n", data))
                 }
                 Ok(StreamEvent::ToolCalls(tool_calls)) => {
+                    had_tool_calls_clone.store(true, std::sync::atomic::Ordering::Relaxed);
                     // Convert Ollama tool_calls to OpenAI format
                     let openai_tool_calls: Vec<serde_json::Value> = tool_calls
                         .as_array()
@@ -220,6 +223,7 @@ async fn chat_completions(
                         })
                         .unwrap_or_default();
 
+                    // Send tool_calls with null finish_reason (not done yet)
                     let data = json!({
                         "id": &sse_chat_id,
                         "object": "chat.completion.chunk",
@@ -228,7 +232,7 @@ async fn chat_completions(
                         "choices": [{
                             "index": 0,
                             "delta": {"tool_calls": openai_tool_calls},
-                            "finish_reason": "tool_calls"
+                            "finish_reason": null
                         }]
                     });
                     Ok(format!("data: {}\n\n", data))
@@ -254,7 +258,9 @@ async fn chat_completions(
         // Append the final done event
         let final_model = model.clone();
         let final_chat_id = chat_id.clone();
+        let final_had_tc = had_tool_calls.clone();
         let final_stream = sse_stream.chain(stream::once(async move {
+            let finish_reason = if final_had_tc.load(std::sync::atomic::Ordering::Relaxed) { "tool_calls" } else { "stop" };
             let final_data = json!({
                 "id": &final_chat_id,
                 "object": "chat.completion.chunk",
@@ -263,7 +269,7 @@ async fn chat_completions(
                 "choices": [{
                     "index": 0,
                     "delta": {},
-                    "finish_reason": "stop"
+                    "finish_reason": finish_reason
                 }]
             });
             Ok::<String, std::convert::Infallible>(format!("data: {}\n\ndata: [DONE]\n\n", final_data))

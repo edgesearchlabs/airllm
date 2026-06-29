@@ -11,7 +11,7 @@ AIRLLM_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 # Config
 BRIDGE_ADDR="${AIRLLM_BRIDGE_ADDR:-127.0.0.1:18080}"
 OLLAMA_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
-DEFAULT_MODEL="${OPENAI_MODEL:-qwen2.5-coder:14b}"
+DEFAULT_MODEL="${OPENAI_MODEL:-qwen3.5:4b}"
 
 # Colors
 GREEN='\033[0;32m'
@@ -46,6 +46,11 @@ export OPENAI_MODEL="$DEFAULT_MODEL"
 # Use simple system prompt for local models (avoids 3000+ token system prompt
 # that kills performance on small models like qwen3.5:4b)
 export CLAUDE_CODE_SIMPLE=1
+
+# Force all requests (including background/title/summary) to use the same
+# fast model. Without this, the frontend makes parallel calls with the
+# heavy default model (qwen2.5-coder:14b = 90s per call).
+export AIRLLM_FORCE_MODEL="$DEFAULT_MODEL"
 
 # Start the frontend
 node "$SCRIPT_DIR/openairllm" "$@"

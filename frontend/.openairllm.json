@@ -1,6 +1,6 @@
 {
   "provider": "ollama",
-  "model": "qwen2.5-coder:14b",
+  "model": "qwen3.5:4b",
   "permissions": "default",
   "brand": "OpenAirLLM By EdgeSearch",
   "bridge_addr": "127.0.0.1:18080",

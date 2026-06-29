@@ -91,6 +91,23 @@ async fn chat_completions(
         "bridge: /v1/chat/completions"
     );
 
+    // Force a single model for all requests to avoid the frontend making
+    // parallel calls with a heavy model (e.g. qwen2.5-coder:14b takes 90s).
+    // The AIRLLM_FORCE_MODEL env var, if set, overrides the requested model.
+    // This ensures ALL calls (including background/title/summary) use the
+    // same fast model.
+    let effective_model = std::env::var("AIRLLM_FORCE_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| req.model.clone());
+    if effective_model != req.model {
+        info!(
+            requested = %req.model,
+            forced = %effective_model,
+            "Forcing model for performance"
+        );
+    }
+
     // Convert OpenAI messages to Ollama messages.
     // Replace the frontend's system prompt with a minimal one for local models.
     // The OpenAirLLM/Ink frontend sends 3000+ token system prompts that kill
@@ -134,7 +151,7 @@ async fn chat_completions(
     if req.stream {
         // Streaming SSE response — real token-by-token streaming from Ollama.
         // The Ollama API sends NDJSON chunks; we convert each to an OpenAI SSE event.
-        let model = req.model.clone();
+        let model = effective_model.clone();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -143,7 +160,7 @@ async fn chat_completions(
 
         let ollama_stream = state
             .ollama
-            .chat_stream(&req.model, &messages, chat_options)
+            .chat_stream(&effective_model, &messages, chat_options)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -215,7 +232,7 @@ async fn chat_completions(
         // Non-streaming JSON response
         let content = state
             .ollama
-            .chat(&req.model, &messages, chat_options)
+            .chat(&effective_model, &messages, chat_options)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -228,7 +245,7 @@ async fn chat_completions(
             id: format!("chatcmpl-{}", now),
             object: "chat.completion".to_string(),
             created: now,
-            model: req.model,
+            model: effective_model,
             choices: vec![ChatChoice {
                 index: 0,
                 message: ChatMessage {

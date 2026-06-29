@@ -7,7 +7,7 @@
  * parses theme values with `parseRGB`, which only matches `rgb(...)` strings.
  */
 
-export const BRAND_NAME = 'By Air LLM EdgeSearch'
+export const BRAND_NAME = 'EdgeIA'
 
 export const BRAND_TAGLINE = 'By Air LLM EdgeSearch'
 

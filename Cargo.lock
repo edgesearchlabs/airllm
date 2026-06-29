@@ -31,6 +31,7 @@ dependencies = [
  "airllm-orchestrator",
  "anyhow",
  "axum",
+ "futures",
  "serde",
  "serde_json",
  "tokio",

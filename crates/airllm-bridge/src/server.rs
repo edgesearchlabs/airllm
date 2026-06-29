@@ -5,12 +5,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use airllm_orchestrator::Orchestrator;
 use airllm_ollama::{ChatOptions, Message, OllamaClient};
 use axum::{
+    body::Body,
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
     routing::post,
     Router,
 };
+use futures::stream;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -73,28 +75,24 @@ impl BridgeServer {
 
 /// POST /v1/chat/completions — OpenAI-compatible chat completions.
 ///
-/// This is a **transparent proxy** to Ollama. The frontend (OpenAirLLM/Ink)
-/// manages its own tool calling, system prompts, and permission dialogs.
-/// The bridge just forwards messages straight to Ollama and formats the
-/// response in OpenAI format. This avoids double-processing (frontend
-/// system prompt + orchestrator system prompt) which was causing extreme
-/// latency with local models.
+/// Supports both streaming (SSE) and non-streaming responses.
+/// When `stream: true`, returns Server-Sent Events in OpenAI format.
+/// The bridge is a transparent proxy to Ollama — the frontend manages
+/// its own tool calling, system prompts, and permission dialogs.
 async fn chat_completions(
     State(state): State<BridgeState>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Result<Json<ChatCompletionResponse>, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     info!(
         model = %req.model,
         messages = req.messages.len(),
         tools = req.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+        stream = req.stream,
         "bridge: /v1/chat/completions"
     );
 
     // Convert OpenAI messages to Ollama messages.
-    // Truncate system prompt to 500 chars for local models — the full
-    // OpenAirLLM system prompt is 3000+ tokens which kills performance
-    // on small models. The frontend's CLAUDE_CODE_SIMPLE=1 already
-    // reduces this, but we truncate as a safety net.
+    // Truncate system prompt for local model performance.
     const MAX_SYSTEM_PROMPT: usize = 800;
     let messages: Vec<Message> = req
         .messages
@@ -118,42 +116,115 @@ async fn chat_completions(
         })
         .collect();
 
-    // Forward directly to Ollama — no orchestrator, no double system prompt.
     let chat_options = ChatOptions {
         temperature: req.temperature.unwrap_or(0.7),
         ..ChatOptions::default()
     };
 
-    let content = state
-        .ollama
-        .chat(&req.model, &messages, chat_options)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if req.stream {
+        // Streaming SSE response — OpenAI format
+        let model = req.model.clone();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let chat_id = format!("chatcmpl-{}", now);
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+        // Get the full response from Ollama, then stream it as SSE chunks.
+        // This is simpler than proxying Ollama's stream and works reliably.
+        let content = state
+            .ollama
+            .chat(&req.model, &messages, chat_options)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(ChatCompletionResponse {
-        id: format!("chatcmpl-{}", now),
-        object: "chat.completion".to_string(),
-        created: now,
-        model: req.model,
-        choices: vec![ChatChoice {
-            index: 0,
-            message: ChatMessage {
-                role: "assistant".to_string(),
-                content,
+        // Build SSE stream: send content in chunks, then a final done event
+        let chunk_size = 4; // chars per SSE chunk
+        let chars: Vec<char> = content.chars().collect();
+        let chunks: Vec<String> = chars
+            .chunks(chunk_size)
+            .map(|c| c.iter().collect())
+            .collect();
+
+        let sse_events: Vec<String> = chunks
+            .iter()
+            .map(|chunk| {
+                let data = json!({
+                    "id": &chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": now,
+                    "model": &model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": chunk},
+                        "finish_reason": null
+                    }]
+                });
+                format!("data: {}\n\n", data)
+            })
+            .collect();
+
+        // Final done event
+        let final_data = json!({
+            "id": &chat_id,
+            "object": "chat.completion.chunk",
+            "created": now,
+            "model": &model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        });
+        let mut all_events = sse_events;
+        all_events.push(format!("data: {}\n\n", final_data));
+        all_events.push("data: [DONE]\n\n".to_string());
+
+        let stream = stream::iter(all_events.into_iter().map(Ok::<_, std::convert::Infallible>));
+        let body = Body::from_stream(stream);
+
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .header("connection", "keep-alive")
+            .body(body)
+            .unwrap())
+    } else {
+        // Non-streaming JSON response
+        let content = state
+            .ollama
+            .chat(&req.model, &messages, chat_options)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let response = ChatCompletionResponse {
+            id: format!("chatcmpl-{}", now),
+            object: "chat.completion".to_string(),
+            created: now,
+            model: req.model,
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage {
+                    role: "assistant".to_string(),
+                    content,
+                },
+                finish_reason: "stop".to_string(),
+            }],
+            usage: Usage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
             },
-            finish_reason: "stop".to_string(),
-        }],
-        usage: Usage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        },
-    }))
+        };
+
+        Ok(Json(response).into_response())
+    }
 }
 
 /// GET /v1/models — list available models (OpenAI-compatible).

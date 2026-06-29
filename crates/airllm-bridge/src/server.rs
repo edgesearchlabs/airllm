@@ -113,7 +113,7 @@ async fn chat_completions(
     // that the model needs to know how to call tools. We must preserve these.
     // For local models, we truncate very large prompts but keep the tool
     // instructions at the end (which is where OpenAirLLM puts them).
-    const MAX_SYSTEM_PROMPT: usize = 2000;
+    const MAX_SYSTEM_PROMPT: usize = 8000;
     let messages: Vec<Message> = req
         .messages
         .iter()
@@ -145,17 +145,19 @@ async fn chat_completions(
         ..ChatOptions::default()
     };
 
-    // DO NOT pass tools to Ollama. The frontend (OpenAirLLM/Ink) uses an
-    // XML-based tool calling mechanism that expects the model to emit tool
-    // calls as text. When we pass tools to Ollama's native function calling,
-    // the model returns structured tool_calls in delta.tool_calls which the
-    // frontend's OpenAI shim cannot process properly — it expects Anthropic
-    // format, not OpenAI delta.tool_calls.
-    //
-    // The frontend's system prompt already contains XML tool instructions
-    // that tell the model how to emit tool calls as text. The bridge just
-    // needs to pass the messages through and let the model generate text.
-    let ollama_tools: Option<Vec<serde_json::Value>> = None;
+    // Pass tools to Ollama's native function calling. The frontend's OpenAI
+    // shim has code to handle delta.tool_calls in the SSE stream.
+    let ollama_tools: Option<Vec<serde_json::Value>> = req.tools.map(|t| {
+        t.into_iter()
+            .map(|tool| {
+                if tool.get("type").and_then(|v| v.as_str()) == Some("function") {
+                    tool
+                } else {
+                    json!({"type": "function", "function": tool})
+                }
+            })
+            .collect()
+    });
 
     if req.stream {
         // Streaming SSE response — real token-by-token streaming from Ollama.

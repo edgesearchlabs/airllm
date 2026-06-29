@@ -60,8 +60,9 @@ export CLAUDE_CODE_SIMPLE=1
 # heavy default model (qwen2.5-coder:14b = 90s per call).
 export AIRLLM_FORCE_MODEL="$DEFAULT_MODEL"
 
-# Start the frontend
-node "$SCRIPT_DIR/openairllm" "$@"
+# Start the frontend with bypass permissions so it can create files
+# without prompting the user on every tool call.
+node "$SCRIPT_DIR/openairllm" --dangerously-skip-permissions "$@"
 
 # Cleanup: kill bridge when frontend exits
 kill $BRIDGE_PID 2>/dev/null || true
